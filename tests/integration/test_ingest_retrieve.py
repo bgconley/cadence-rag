@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+from uuid import uuid4
+
+from fastapi.testclient import TestClient
+
+
+def test_ingest_and_retrieve_roundtrip(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    call_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Smoke Test Call",
+        }
+    }
+    call_resp = client.post("/ingest/call", json=call_payload)
+    assert call_resp.status_code == 200
+    assert call_resp.json()["created"] is True
+
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Smoke Test Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 5000,
+                    "text": "We saw ECONNRESET in api-gateway.",
+                },
+                {
+                    "speaker": "Bob",
+                    "start_ts_ms": 5000,
+                    "end_ts_ms": 10000,
+                    "text": "Let's roll back version 1.2.3.",
+                },
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 10000,
+                    "end_ts_ms": 15000,
+                    "text": "Action item: file ticket ABC-123.",
+                },
+            ],
+        },
+    }
+    transcript_resp = client.post("/ingest/transcript", json=transcript_payload)
+    assert transcript_resp.status_code == 200
+    call_id = transcript_resp.json()["call_id"]
+
+    analysis_payload = {
+        "call_ref": {"external_source": "test", "external_id": external_id},
+        "artifacts": [
+            {
+                "kind": "summary",
+                "content": "We saw ECONNRESET in api-gateway and planned rollback.",
+            }
+        ],
+    }
+    analysis_resp = client.post("/ingest/analysis", json=analysis_payload)
+    assert analysis_resp.status_code == 200
+    assert analysis_resp.json()["call_id"] == call_id
+
+    retrieve_payload = {
+        "query": "Where did we discuss ECONNRESET in api-gateway?",
+        "intent": "troubleshooting",
+        "budget": {"max_evidence_items": 6, "max_total_chars": 2000},
+    }
+    retrieve_resp = client.post("/retrieve", json=retrieve_payload)
+    assert retrieve_resp.status_code == 200
+    body = retrieve_resp.json()
+    assert body["quotes"], "expected at least one quote"
+    assert any("ECONNRESET" in quote["snippet"] for quote in body["quotes"])
+
+
+def test_retrieve_with_call_ref_filter(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Filter Test Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "ECONNRESET happened once.",
+                }
+            ],
+        },
+    }
+    transcript_resp = client.post("/ingest/transcript", json=transcript_payload)
+    assert transcript_resp.status_code == 200
+
+    retrieve_payload = {
+        "query": "ECONNRESET",
+        "filters": {"external_source": "test", "external_id": external_id},
+    }
+    retrieve_resp = client.post("/retrieve", json=retrieve_payload)
+    assert retrieve_resp.status_code == 200
+    body = retrieve_resp.json()
+    assert body["quotes"], "expected quotes for filtered retrieval"
+    assert all(
+        quote["call_id"] == body["quotes"][0]["call_id"] for quote in body["quotes"]
+    )
+
+
+def test_expand_and_browse_endpoints(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Browse Test Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "We saw ECONNRESET in api-gateway.",
+                },
+                {
+                    "speaker": "Bob",
+                    "start_ts_ms": 1000,
+                    "end_ts_ms": 2000,
+                    "text": "Action item: file ticket ABC-123.",
+                },
+            ],
+        },
+    }
+    transcript_resp = client.post("/ingest/transcript", json=transcript_payload)
+    assert transcript_resp.status_code == 200
+    call_id = transcript_resp.json()["call_id"]
+
+    calls_resp = client.get("/calls", params={"external_id": external_id})
+    assert calls_resp.status_code == 200
+    items = calls_resp.json()["items"]
+    assert any(item["call_id"] == call_id for item in items)
+
+    call_resp = client.get(f"/calls/{call_id}")
+    assert call_resp.status_code == 200
+    assert call_resp.json()["counts"]["chunks"] >= 1
+
+    retrieve_resp = client.post(
+        "/retrieve",
+        json={"query": "ECONNRESET", "filters": {"external_id": external_id}},
+    )
+    assert retrieve_resp.status_code == 200
+    evidence_id = retrieve_resp.json()["quotes"][0]["evidence_id"]
+
+    expand_resp = client.post(
+        "/expand",
+        json={"evidence_id": evidence_id, "window_ms": 5000, "max_chars": 2000},
+    )
+    assert expand_resp.status_code == 200
+    assert "ECONNRESET" in expand_resp.json()["snippet"]
