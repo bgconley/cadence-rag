@@ -541,10 +541,13 @@ Operational defaults:
   ],
   "notes": {
     "retrieval": {
-      "planner": "ann|exact",
-      "dense_topk": 50,
+      "planner": "lexical_only|ann|exact",
+      "dense_topk": 0,
       "lex_topk": 50,
-      "reranked_from": 80
+      "artifact_lex_topk": 10,
+      "tech_token_topk": 50,
+      "reranked_from": null,
+      "lanes": { "bm25": true, "tech_tokens": true, "dense": false }
     }
   }
 }
@@ -558,6 +561,10 @@ Operational defaults:
 
 ### Retrieval + answering
 - `POST /retrieve` → evidence pack only
+  - Optional request fields:
+    - `return_style`: `evidence_pack_json` (default) or `ids_only`
+    - `debug`: boolean; when true includes lane ranks/scores (no extra text beyond snippets)
+  - If `return_style=ids_only`, response is `{ query_id, retrieved_ids:[ "chunk:<id>", "artifact:<id>" ] }`
 - `POST /answer` → one-shot answer (includes evidence pack + citations)
 - `POST /expand` → bounded context expansion for one evidence item (uses `chunk_utterances` to reconstruct)
 

@@ -81,6 +81,8 @@ class RetrieveRequest(BaseModel):
     ] = "auto"
     filters: Optional[RetrieveFilters] = None
     budget: Budget = Field(default_factory=Budget)
+    return_style: Literal["evidence_pack_json", "ids_only"] = "evidence_pack_json"
+    debug: bool = False
 
 
 class ExpandRequest(BaseModel):

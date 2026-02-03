@@ -27,6 +27,17 @@ def _clip(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _build_debug_lane(
+    rows: Sequence[Dict[str, Any]], id_field: str
+) -> List[Dict[str, Any]]:
+    lane = []
+    for rank, row in enumerate(rows, start=1):
+        lane.append(
+            {id_field: row[id_field], "rank": rank, "score": row.get("score")}
+        )
+    return lane
+
+
 def _resolve_call_ids(
     conn, filters: Optional[RetrieveFilters]
 ) -> Optional[List[UUID]]:
@@ -239,18 +250,23 @@ def _rrf_merge(
 
 
 def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
+    query_id = str(uuid4())
     query = payload.query.strip()
+    budget = payload.budget or Budget()
+    return_style = payload.return_style
+
     if not query:
+        if return_style == "ids_only":
+            return {"query_id": query_id, "retrieved_ids": []}
         return {
-            "query_id": str(uuid4()),
+            "query_id": query_id,
             "intent": payload.intent,
-            "budget": payload.budget.model_dump(),
+            "budget": budget.model_dump(),
             "artifacts": [],
             "quotes": [],
             "notes": {"error": "empty query"},
         }
 
-    budget = payload.budget or Budget()
     filters = payload.filters
     tech_tokens = extract_tech_tokens(query)
 
@@ -266,12 +282,49 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
             conn, tech_tokens, filters, DEFAULT_TECH_TOPK
         )
 
+    debug_payload = None
+    if payload.debug:
+        debug_payload = {
+            "lanes": {
+                "chunks": {
+                    "bm25": _build_debug_lane(bm25_chunks, "chunk_id"),
+                    "tech_tokens": _build_debug_lane(tech_chunks, "chunk_id"),
+                },
+                "artifacts": {
+                    "bm25": _build_debug_lane(bm25_artifacts, "artifact_id"),
+                    "tech_tokens": _build_debug_lane(tech_artifacts, "artifact_id"),
+                },
+            },
+            "limits": {
+                "bm25_chunk_topk": DEFAULT_CHUNK_BM25_TOPK,
+                "bm25_artifact_topk": DEFAULT_ARTIFACT_BM25_TOPK,
+                "tech_token_topk": DEFAULT_TECH_TOPK,
+            },
+        }
+
     chunk_ranked = _rrf_merge(
         {"bm25": bm25_chunks, "tech_tokens": tech_chunks}, "chunk_id"
     )
     artifact_ranked = _rrf_merge(
         {"bm25": bm25_artifacts, "tech_tokens": tech_artifacts}, "artifact_id"
     )
+
+    if return_style == "ids_only":
+        combined: List[Tuple[str, int, float]] = []
+        for row, _lanes, score in artifact_ranked:
+            combined.append(("artifact", row["artifact_id"], score))
+        for row, _lanes, score in chunk_ranked:
+            combined.append(("chunk", row["chunk_id"], score))
+        kind_order = {"artifact": 0, "chunk": 1}
+        combined.sort(key=lambda item: (-item[2], kind_order[item[0]], item[1]))
+        retrieved_ids = [f"{kind}:{item_id}" for kind, item_id, _ in combined]
+        response: Dict[str, Any] = {
+            "query_id": query_id,
+            "retrieved_ids": retrieved_ids,
+        }
+        if debug_payload is not None:
+            response["debug"] = debug_payload
+        return response
 
     max_items = budget.max_evidence_items
     remaining_chars = budget.max_total_chars
@@ -327,18 +380,27 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
         quotes_per_call[call_id] = quotes_per_call.get(call_id, 0) + 1
         evidence_count += 1
 
-    return {
-        "query_id": str(uuid4()),
+    response: Dict[str, Any] = {
+        "query_id": query_id,
         "intent": payload.intent,
         "budget": budget.model_dump(),
         "artifacts": artifacts_out,
         "quotes": quotes_out,
         "notes": {
             "retrieval": {
+                "planner": "lexical_only",
+                "dense_topk": 0,
+                "lex_topk": DEFAULT_CHUNK_BM25_TOPK,
+                "artifact_lex_topk": DEFAULT_ARTIFACT_BM25_TOPK,
+                "reranked_from": None,
                 "bm25_chunk_topk": DEFAULT_CHUNK_BM25_TOPK,
                 "bm25_artifact_topk": DEFAULT_ARTIFACT_BM25_TOPK,
                 "tech_token_topk": DEFAULT_TECH_TOPK,
                 "tech_tokens": tech_tokens,
+                "lanes": {"bm25": True, "tech_tokens": True, "dense": False},
             }
         },
     }
+    if debug_payload is not None:
+        response["debug"] = debug_payload
+    return response

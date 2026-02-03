@@ -5,17 +5,19 @@
 ## Summary (where we are now)
 **Already implemented and tested:**
 - Postgres 18.1 via ParadeDB (`pg_search` 0.21.5, `pgvector` 0.8.1) with fail-fast version checks.
-- Alembic migrations: initial schema + `calls.external_id/external_source` + BM25 indexes.
+- Alembic migrations: initial schema + `calls.external_id/external_source` + BM25 indexes (including ngram aliases).
 - API endpoints:
   - `GET /health`, `GET /diagnostics`
+  - `POST /ingest/call`
   - `POST /ingest/transcript` (currently `json_turns` only)
   - `POST /ingest/analysis` (supports analysis-only ingest)
-  - `POST /retrieve` (BM25 + tech-token lanes; RRF fusion; budgeted evidence-pack output)
-- Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip.
+  - `GET /calls`, `GET /calls/{call_id}`, `GET /chunks/{chunk_id}`
+  - `POST /expand`
+  - `POST /retrieve` (BM25 + tech-token lanes; RRF fusion; budgeted evidence-pack output; `debug` and `ids_only` modes)
+- Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip, browse/expand, ids-only retrieval, and budget enforcement.
 - FastAPI startup migrated to lifespan (no deprecation warnings).
 
 **Not implemented yet (next):**
-- Browse/provenance endpoints (`/calls`, `/chunks`, `/expand`), ingestion run config recording, ingest idempotency index on `(source_uri, source_hash)`.
 - Dense embeddings lane + pgvector retrieval planner.
 - GPU reranking.
 - `/answer` with citation gating and LLM gateway.

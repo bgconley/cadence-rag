@@ -169,3 +169,96 @@ def test_expand_and_browse_endpoints(client: TestClient) -> None:
     )
     assert expand_resp.status_code == 200
     assert "ECONNRESET" in expand_resp.json()["snippet"]
+
+
+def test_retrieve_ids_only_stable(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "IDs Only Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "We saw ECONNRESET in api-gateway.",
+                }
+            ],
+        },
+    }
+    assert client.post("/ingest/transcript", json=transcript_payload).status_code == 200
+
+    analysis_payload = {
+        "call_ref": {"external_source": "test", "external_id": external_id},
+        "artifacts": [
+            {
+                "kind": "summary",
+                "content": "ECONNRESET appeared in the gateway logs.",
+            }
+        ],
+    }
+    assert client.post("/ingest/analysis", json=analysis_payload).status_code == 200
+
+    retrieve_payload = {"query": "ECONNRESET", "return_style": "ids_only"}
+    resp_one = client.post("/retrieve", json=retrieve_payload)
+    resp_two = client.post("/retrieve", json=retrieve_payload)
+    assert resp_one.status_code == 200
+    assert resp_two.status_code == 200
+    ids_one = resp_one.json()["retrieved_ids"]
+    ids_two = resp_two.json()["retrieved_ids"]
+    assert ids_one == ids_two
+    assert any(item.startswith("chunk:") for item in ids_one)
+    assert any(item.startswith("artifact:") for item in ids_one)
+
+
+def test_retrieve_respects_budget(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Budget Test Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "We saw ECONNRESET in api-gateway.",
+                }
+            ],
+        },
+    }
+    assert client.post("/ingest/transcript", json=transcript_payload).status_code == 200
+
+    analysis_payload = {
+        "call_ref": {"external_source": "test", "external_id": external_id},
+        "artifacts": [
+            {
+                "kind": "summary",
+                "content": "ECONNRESET appeared in the gateway logs.",
+            }
+        ],
+    }
+    assert client.post("/ingest/analysis", json=analysis_payload).status_code == 200
+
+    retrieve_payload = {
+        "query": "ECONNRESET",
+        "budget": {"max_evidence_items": 1, "max_total_chars": 20},
+    }
+    retrieve_resp = client.post("/retrieve", json=retrieve_payload)
+    assert retrieve_resp.status_code == 200
+    body = retrieve_resp.json()
+    total_items = len(body["artifacts"]) + len(body["quotes"])
+    assert total_items <= 1
+    for item in body["artifacts"] + body["quotes"]:
+        assert len(item["snippet"]) <= 20
