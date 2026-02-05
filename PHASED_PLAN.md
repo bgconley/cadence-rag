@@ -1,6 +1,6 @@
 # Personal RAG — Phased Implementation Plan (Forward Roadmap)
 **Status:** Canonical  \
-**Last updated:** 2026-02-03
+**Last updated:** 2026-02-04
 
 ## Summary (where we are now)
 **Already implemented and tested:**
@@ -19,6 +19,7 @@
 
 **Not implemented yet (next):**
 - Dense embeddings lane + pgvector retrieval planner.
+- Analysis artifact chunking into `artifact_chunks` (analysis retrieval units) and switching the artifact lanes + evidence IDs to chunk-level.
 - GPU reranking.
 - `/answer` with citation gating and LLM gateway.
 - Entity extraction + entity filters + faceting.
@@ -54,7 +55,7 @@
    - Input: `{ evidence_id, window_ms?, max_chars }` (compatible with MCP intent).
    - Behavior:
      - For chunk evidence: use `chunk_utterances` to fetch adjacent utterances deterministically (by ordinal), then optionally apply `window_ms`.
-     - For artifact evidence: return bounded excerpt from `analysis_artifacts.content`.
+     - For analysis evidence: return bounded excerpt from `artifact_chunks.content` (or from the parent artifact using `start_char/end_char` when available).
 
 4) **DB idempotency hardening**
    - Add a unique index on `calls(source_uri, source_hash)` where both are non-null.
@@ -86,7 +87,7 @@
    - Ensure `/retrieve` output matches `APP_SPEC.md` contract:
      - stable `query_id`
      - explicit `notes.retrieval` config snapshot
-     - consistent evidence IDs (`A-<artifact_id>`, `Q-<chunk_id>`)
+     - consistent evidence IDs (`A-<artifact_chunk_id>`, `Q-<chunk_id>`)
 
 2) **Add optional debug/trace mode**
    - Request field: `debug: bool` (default false)
@@ -94,12 +95,13 @@
 
 3) **Support “return IDs only” mode for eval**
    - Request field: `return_style: "evidence_pack_json" | "ids_only"`
-   - `ids_only` returns `{ query_id, retrieved_ids:[...] }` using `chunk:<id>` / `artifact:<id>`.
+   - `ids_only` returns `{ query_id, retrieved_ids:[...] }` using `chunk:<id>` / `artifact_chunk:<id>`.
 
 4) **BM25 ngram robustness (ASR noise)**
    - Add a new migration that upgrades BM25 indexes to include an ngram-tokenized alias for:
      - `chunks.text`
-     - `analysis_artifacts.content`
+     - `artifact_chunks.content` (preferred; retrieval units)
+     - `analysis_artifacts.content` (optional coarse fallback)
    - Keep existing trigram index as fallback; do not worry about index bloat.
 
 ### Tests
@@ -109,6 +111,54 @@
 
 ### Acceptance criteria
 - `/retrieve` output is stable enough to be a contract for `/answer` and eval harness.
+
+---
+
+## Phase 2C — Analysis artifact chunking (`artifact_chunks`) + artifact-lane fixups (still no embeddings)
+**Goal:** make analysis artifacts behave like transcripts in retrieval: chunk-level candidates, relevant snippets, and future-ready embeddings.
+
+### Deliverables
+1) **Schema: add `artifact_chunks`**
+   - New table: `artifact_chunks` (FK to `analysis_artifacts`, plus `call_id`, `call_started_at`, `kind`, `ordinal`, `content`, `token_count`, optional `start_char/end_char`).
+   - Indexes:
+     - BM25 (+ ngram alias) on `artifact_chunks.content` (primary lexical lane for analysis evidence)
+     - GIN on `artifact_chunks.tech_tokens`
+     - (prep for Phase 3) HNSW on `artifact_chunks.embedding vector(1024)` (even if embeddings remain null for now)
+
+2) **Ingest: chunk analysis artifacts deterministically**
+   - On `POST /ingest/analysis`:
+     - Store the canonical full artifact in `analysis_artifacts` (unchanged).
+     - Create retrieval units in `artifact_chunks`:
+       - chunk by headings/bullets/paragraphs (kind-aware)
+       - `action_items`: prefer 1 chunk per item
+       - `decisions`: prefer 1 chunk per decision bullet/paragraph
+     - Compute `tech_tokens` per chunk.
+     - Record the chunking config in `ingestion_runs.chunking_config`.
+
+3) **Retrieval: switch analysis lanes to `artifact_chunks`**
+   - Replace artifact BM25 + tech-token lanes to query `artifact_chunks` instead of `analysis_artifacts`.
+   - Evidence-pack artifacts now reference **artifact chunks** (not whole artifacts).
+   - Update `return_style=ids_only` to return:
+     - `chunk:<id>` (transcript chunks)
+     - `artifact_chunk:<id>` (analysis chunks)
+
+4) **Evidence IDs + expand**
+   - Evidence ID formats (for `/retrieve` and `/expand`):
+     - `Q-<chunk_id>` (transcript evidence)
+     - `A-<artifact_chunk_id>` (analysis evidence)
+   - Update `POST /expand`:
+     - `Q-*`: unchanged (uses `chunk_utterances` + optional window)
+     - `A-*`: returns bounded excerpt from `artifact_chunks.content` (or from parent using `start_char/end_char` when available)
+
+### Tests
+- Integration: ingest analysis artifacts with multiple paragraphs/bullets, verify `artifact_chunks` created and retrievable.
+- Integration: `/retrieve` returns `A-*` evidence IDs and snippets that actually contain the relevant passage.
+- Integration: `/expand` supports `A-*` and respects `max_chars`.
+- Unit: chunking is deterministic (same input → same chunk boundaries and ordinals).
+
+### Acceptance criteria
+- Analysis retrieval is chunk-granular and budget-friendly; snippets are relevant.
+- Evidence IDs are stable and can round-trip through `/expand`.
 
 ---
 
@@ -127,7 +177,7 @@
 2) **Embedding backfill command**
    - `uv run python -m app.scripts.embed_backfill`
    - Behavior:
-     - Finds rows in `chunks` and `analysis_artifacts` where `embedding IS NULL`.
+     - Finds rows in `chunks` and `artifact_chunks` where `embedding IS NULL`.
      - Batches embedding requests.
      - Updates embeddings in DB.
      - Writes an `ingestion_runs` update/record indicating embedding completion.
@@ -137,7 +187,7 @@
      - If `EMBEDDINGS_BASE_URL` not set: skip dense lane and record in `notes`.
      - Else:
        - embed query
-       - run pgvector search for chunks + artifacts
+       - run pgvector search for chunks + artifact_chunks
        - planner chooses:
          - **exact scan** when filtered candidate set is small (e.g., scoped call_ids) OR
          - **HNSW** otherwise
@@ -173,6 +223,7 @@
 2) **Pipeline integration**
    - `/retrieve`:
      - candidate fetch per lane → RRF → take top N → rerank → select top M
+     - candidates include transcript chunks (`chunks`) and analysis chunks (`artifact_chunks`)
      - enforce per-call diversity caps and dedupe rules
 
 ### Tests
@@ -238,7 +289,7 @@
    - Env vars:
      - `NER_BASE_URL`
      - `NER_MODEL_ID`
-   - Populate `entities` and `chunk_entities/artifact_entities`.
+   - Populate `entities` and `chunk_entities/artifact_entities` (entity filters should work for `artifact_chunks` via `artifact_id`).
 
 3) **Retrieval filters**
    - `RetrieveFilters.entity_filters = [{label, value}]`

@@ -1,6 +1,6 @@
 # Personal RAG (Transcript-Centric) — Implementation Plan
 **Status:** Canonical  
-**Last updated:** 2026-02-03  
+**Last updated:** 2026-02-04  
 
 ## 0) Guiding rules (non-negotiable)
 - Retrieval is deterministic and server-orchestrated; the LLM never “chooses tools.”
@@ -8,7 +8,7 @@
 - Exact technical token recall is treated as a first-class requirement (not “nice to have”).
 - Pin versions early (DB image + extensions + models), **assert at startup**, and record configs per ingestion run.
 
-## 0.1) Pinned versions (as of 2026-02-03)
+## 0.1) Pinned versions (as of 2026-02-04)
 - Postgres: **18.1**
 - ParadeDB Docker image: `paradedb/paradedb:0.21.5-pg18` (then pin by digest)
 - `pg_search` (extversion): **0.21.5**
@@ -24,7 +24,7 @@
   - API service skeleton
   - Worker skeleton (optional in this phase)
 - Migration framework (Alembic or similar)
-- Initial schema applied (calls/utterances/chunks/chunk_utterances/artifacts/entities)
+- Initial schema applied (calls/utterances/chunks/chunk_utterances/analysis_artifacts/artifact_chunks/entities)
 - Health/diagnostics endpoints:
   - DB connectivity
   - `server_version`
@@ -48,7 +48,7 @@
 ### Deliverables
 - Gold set format (YAML/JSONL) with:
   - query text
-  - required relevant IDs (artifact_id/chunk_id)
+  - required relevant IDs (artifact_chunk_id/chunk_id)
   - expected answer bullets (optional)
 - Metrics scripts:
   - recall@k, MRR, nDCG@k
@@ -91,18 +91,18 @@
   - stored in `tech_tokens` arrays
 - BM25 search using `pg_search` for:
   - chunks.text
-  - artifacts.content
+  - artifact_chunks.content (preferred for analysis evidence packs)
 - Pin and implement canonical BM25 indexes in migrations (include n-gram tokenization where needed)
 - Dense vector search using `pgvector` HNSW for:
   - chunks.embedding
-  - artifacts.embedding
+  - artifact_chunks.embedding
 - Retrieval planner:
   - decides ANN vs exact scan for dense queries based on filter selectivity / estimated rows
 - A single `POST /retrieve` endpoint returning:
   - lane results with scores and provenance
   - fused candidates (RRF) before reranking
 - Implement hierarchical retrieval with a recall-safe fallback:
-  - artifacts → shortlist calls → scoped chunk search
+  - artifact_chunks → shortlist calls → scoped chunk search
   - fallback to global chunk search when shortlist confidence is low
 
 ### Acceptance criteria

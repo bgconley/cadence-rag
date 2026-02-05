@@ -252,7 +252,57 @@ CREATE INDEX IF NOT EXISTS artifacts_embedding_hnsw
   ON analysis_artifacts USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
 
--- 6) Entities (semantic + technical)
+-- 6) Artifact chunks (analysis retrieval units)
+--
+-- Purpose:
+-- - `analysis_artifacts` remains the canonical, full document for provenance/browsing.
+-- - `artifact_chunks` are the *retrieval units* (mirrors `utterances -> chunks`).
+--
+-- Why:
+-- - Avoid coarse retrieval: whole-document artifacts are too big for evidence-pack budgets.
+-- - Avoid poor dense retrieval: a single embedding for a long artifact is a semantic average.
+-- - Ensure artifact snippets are actually relevant (not just "first N chars of the doc").
+--
+-- Notes:
+-- - `content` is the chunk text used for BM25 + tech token lanes.
+-- - `start_char`/`end_char` are optional offsets into the parent `analysis_artifacts.content` (if computed).
+CREATE TABLE IF NOT EXISTS artifact_chunks (
+  artifact_chunk_id BIGSERIAL PRIMARY KEY,
+  artifact_id       BIGINT NOT NULL REFERENCES analysis_artifacts(artifact_id) ON DELETE CASCADE,
+  call_id           UUID NOT NULL REFERENCES calls(call_id) ON DELETE CASCADE,
+  corpus_id         UUID REFERENCES corpora(corpus_id) ON DELETE SET NULL,
+  call_started_at   TIMESTAMPTZ NOT NULL,
+
+  kind              TEXT NOT NULL,             -- denormalized from analysis_artifacts.kind
+  ordinal           INT NOT NULL,              -- order within (artifact_id)
+  content           TEXT NOT NULL,
+  token_count       INT NOT NULL,
+  start_char        INT,                       -- optional: offset into analysis_artifacts.content
+  end_char          INT,                       -- optional: offset into analysis_artifacts.content
+
+  embedding         vector(1024),
+  tech_tokens       TEXT[] NOT NULL DEFAULT '{}',
+  metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE (artifact_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS artifact_chunks_artifact_ordinal_idx
+  ON artifact_chunks (artifact_id, ordinal);
+CREATE INDEX IF NOT EXISTS artifact_chunks_call_kind_idx
+  ON artifact_chunks (call_id, kind);
+CREATE INDEX IF NOT EXISTS artifact_chunks_started_at_idx
+  ON artifact_chunks (call_started_at DESC);
+CREATE INDEX IF NOT EXISTS artifact_chunks_meta_gin
+  ON artifact_chunks USING GIN (metadata);
+CREATE INDEX IF NOT EXISTS artifact_chunks_tech_tokens_gin
+  ON artifact_chunks USING GIN (tech_tokens);
+CREATE INDEX IF NOT EXISTS artifact_chunks_embedding_hnsw
+  ON artifact_chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- 7) Entities (semantic + technical)
 CREATE TABLE IF NOT EXISTS entities (
   entity_id         BIGSERIAL PRIMARY KEY,
   label             TEXT NOT NULL,             -- PERSON, ORG, SERVICE, ERROR_CODE, TICKET_ID, ...
@@ -262,7 +312,7 @@ CREATE TABLE IF NOT EXISTS entities (
   UNIQUE (label, normalized)
 );
 
--- 7) Mentions
+-- 8) Mentions
 CREATE TABLE IF NOT EXISTS chunk_entities (
   chunk_id          BIGINT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   entity_id         BIGINT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
@@ -285,7 +335,7 @@ CREATE TABLE IF NOT EXISTS artifact_entities (
 CREATE INDEX IF NOT EXISTS artifact_entities_entity_idx
   ON artifact_entities (entity_id);
 
--- 8) Pipeline config (reproducibility)
+-- 9) Pipeline config (reproducibility)
 CREATE TABLE IF NOT EXISTS ingestion_runs (
   ingestion_run_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   call_id           UUID NOT NULL REFERENCES calls(call_id) ON DELETE CASCADE,
@@ -301,7 +351,8 @@ CREATE INDEX IF NOT EXISTS ingestion_runs_call_idx ON ingestion_runs (call_id);
 ### 7.3 Lexical search with pg_search (BM25)
 Use `pg_search` BM25 indexes as the **primary lexical lane** for:
 - chunks.text
-- analysis_artifacts.content
+- artifact_chunks.content (preferred; retrieval units)
+- analysis_artifacts.content (optional coarse fallback)
 - (optional) calls.title / metadata-derived fields
 
 Tokenizer guidance:
@@ -320,7 +371,16 @@ USING bm25 (
 )
 WITH (key_field='chunk_id');
 
--- BM25 over artifacts
+-- BM25 over artifact chunks (preferred for evidence packs)
+CREATE INDEX IF NOT EXISTS artifact_chunks_bm25_idx ON artifact_chunks
+USING bm25 (
+  artifact_chunk_id,
+  content,
+  (content::pdb.ngram(3,3, 'alias=artifact_chunk_content_ngram'))
+)
+WITH (key_field='artifact_chunk_id');
+
+-- BM25 over whole artifacts (optional coarse fallback)
 CREATE INDEX IF NOT EXISTS artifacts_bm25_idx ON analysis_artifacts
 USING bm25 (
   artifact_id,
@@ -333,7 +393,8 @@ WITH (key_field='artifact_id');
 ### 7.4 Exact-token lane (must-have for technical reliability)
 At ingestion, extract high-signal technical tokens and store them in:
 - `chunks.tech_tokens`
-- `analysis_artifacts.tech_tokens`
+- `artifact_chunks.tech_tokens` (preferred; retrieval units)
+- `analysis_artifacts.tech_tokens` (optional coarse fallback)
 
 Examples:
 - ticket IDs: `ABC-123`, `JIRA-9381`
@@ -392,10 +453,17 @@ Provenance storage (recommended in `metadata`):
 2. **Store utterances**
    - One row per turn with timestamps and speaker
 3. **Chunking**
-   - Target 250–450 tokens, hard max 600
-   - Overlap ~50 tokens (or 1–2 utterances)
-   - Prefer semantic boundaries; avoid splitting code/log blocks
-   - Write `chunk_utterances` mapping for deterministic expand
+   - Transcript chunking (`utterances` → `chunks`)
+     - Target 250–450 tokens, hard max 600
+     - Overlap ~50 tokens (or 1–2 utterances)
+     - Prefer semantic boundaries; avoid splitting code/log blocks
+     - Write `chunk_utterances` mapping for deterministic expand
+   - Analysis artifact chunking (`analysis_artifacts` → `artifact_chunks`)
+     - Chunk by document structure (headings, bullet groups, paragraphs) rather than speaker turns
+     - Use `kind` (`summary`, `decisions`, `action_items`, `tech_notes`, etc.) to guide chunking:
+       - `action_items`: prefer 1 chunk per action item
+       - `decisions`: prefer 1 chunk per decision bullet / paragraph
+     - Store `artifact_id`, `ordinal`, and (optionally) `start_char`/`end_char` into the parent artifact
 4. **Tech token extraction**
    - Regex/rule extraction for IDs/errors/versions/etc → `tech_tokens`
 5. **Entity extraction**
@@ -403,7 +471,8 @@ Provenance storage (recommended in `metadata`):
    - Rule-based entities for technical patterns (high precision)
    - Store in `entities` + mention tables
 6. **Embeddings**
-   - Embed chunks and artifacts (dim=1024)
+   - Embed transcript chunks and artifact chunks (dim=1024)
+   - (Optional) also embed whole artifacts (`analysis_artifacts.embedding`) as a coarse fallback vector
    - Store embedding config in `ingestion_runs`
 7. **Indexing**
    - pgvector HNSW for dense
@@ -422,9 +491,9 @@ Provenance storage (recommended in `metadata`):
 
 ### 9.2 Hierarchical retrieval (default strategy, with recall-safe fallback)
 1. **Call/artifact retrieval**
-   - Lexical BM25 on artifacts (decisions/action items/summaries)
-   - Dense vector search on artifact embeddings
-   - Result: shortlist of calls and high-signal artifacts
+   - Lexical BM25 on **artifact chunks** (decisions/action items/summaries/tech notes)
+   - Dense vector search on **artifact chunk embeddings**
+   - Result: shortlist of calls and high-signal artifact chunks (retrieval units)
 2. **Chunk retrieval scoped to shortlisted calls**
    - Lexical BM25 on chunks.text (within call subset)
    - Dense vector search on chunks.embedding (within call subset)
@@ -440,7 +509,7 @@ Recall-safe fallback (avoid “artifact shortlist missed the right call”):
 - If the query contains extracted `tech_tokens`, include a **global `tech_tokens` match lane** regardless of call scoping (cheap insurance for exact identifiers).
 
 ### 9.3 Retrieval planner (ANN vs exact)
-For each dense query (chunks or artifacts), choose between:
+For each dense query (chunks or artifact_chunks), choose between:
 - **ANN (HNSW)** when the candidate set is large and filters are broad
 - **Exact scan** when filters narrow the candidate set sufficiently (e.g., “within top calls” or tight date range)
 
@@ -456,13 +525,13 @@ Planner inputs:
 
 ### 9.5 Evidence pack construction (budgeted)
 Default targets:
-- 1–2 artifacts (decision/action/summary) when relevant
+- 1–2 artifact chunks (decision/action/summary) when relevant
 - 2–6 transcript quotes
 - Max 2 quotes per call (unless deep-dive requested)
 
 Each evidence item includes:
 - stable evidence_id
-- provenance (call_id, chunk_id/artifact_id, speaker, timestamps)
+- provenance (call_id, chunk_id and/or artifact_chunk_id + artifact_id, speaker, timestamps)
 - bounded snippet
 - 1-sentence “why relevant”
 - scores and lane metadata
@@ -519,9 +588,10 @@ Operational defaults:
   "budget": { "max_evidence_items": 8, "max_total_chars": 6000 },
   "artifacts": [
     {
-      "evidence_id": "A-123",
+      "evidence_id": "A-789",
       "call_id": "uuid",
       "artifact_id": 456,
+      "artifact_chunk_id": 789,
       "kind": "decisions",
       "snippet": "…",
       "why_relevant": "…"
@@ -544,7 +614,7 @@ Operational defaults:
       "planner": "lexical_only|ann|exact",
       "dense_topk": 0,
       "lex_topk": 50,
-      "artifact_lex_topk": 10,
+      "artifact_chunk_lex_topk": 10,
       "tech_token_topk": 50,
       "reranked_from": null,
       "lanes": { "bm25": true, "tech_tokens": true, "dense": false }
@@ -552,6 +622,10 @@ Operational defaults:
   }
 }
 ```
+
+Evidence ID formats (for citation gating):
+- Transcript quote evidence: `Q-<chunk_id>`
+- Analysis evidence: `A-<artifact_chunk_id>` (includes `artifact_id` for provenance)
 
 ## 12) API surface (OpenAPI-oriented)
 
@@ -564,9 +638,9 @@ Operational defaults:
   - Optional request fields:
     - `return_style`: `evidence_pack_json` (default) or `ids_only`
     - `debug`: boolean; when true includes lane ranks/scores (no extra text beyond snippets)
-  - If `return_style=ids_only`, response is `{ query_id, retrieved_ids:[ "chunk:<id>", "artifact:<id>" ] }`
+  - If `return_style=ids_only`, response is `{ query_id, retrieved_ids:[ "chunk:<id>", "artifact_chunk:<id>" ] }`
 - `POST /answer` → one-shot answer (includes evidence pack + citations)
-- `POST /expand` → bounded context expansion for one evidence item (uses `chunk_utterances` to reconstruct)
+- `POST /expand` → bounded context expansion for one evidence item (uses `chunk_utterances` to reconstruct transcript context; uses `artifact_chunks` for analysis evidence)
 
 ### Browsing
 - `GET /calls/{id}`
