@@ -75,6 +75,11 @@ def test_ingest_and_retrieve_roundtrip(client: TestClient) -> None:
     retrieve_resp = client.post("/retrieve", json=retrieve_payload)
     assert retrieve_resp.status_code == 200
     body = retrieve_resp.json()
+    assert body["artifacts"], "expected at least one analysis artifact chunk"
+    assert all(
+        item["evidence_id"].startswith("A-") for item in body["artifacts"]
+    )
+    assert all("artifact_chunk_id" in item for item in body["artifacts"])
     assert body["quotes"], "expected at least one quote"
     assert any("ECONNRESET" in quote["snippet"] for quote in body["quotes"])
 
@@ -214,7 +219,48 @@ def test_retrieve_ids_only_stable(client: TestClient) -> None:
     ids_two = resp_two.json()["retrieved_ids"]
     assert ids_one == ids_two
     assert any(item.startswith("chunk:") for item in ids_one)
-    assert any(item.startswith("artifact:") for item in ids_one)
+    assert any(item.startswith("artifact_chunk:") for item in ids_one)
+
+
+def test_analysis_evidence_roundtrips_via_expand(client: TestClient) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    analysis_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Artifact Expand Call",
+        },
+        "artifacts": [
+            {
+                "kind": "action_items",
+                "content": "- File ticket ABC-123 for ECONNRESET.\n- Roll back api-gateway to v1.2.3.",
+            }
+        ],
+    }
+    assert client.post("/ingest/analysis", json=analysis_payload).status_code == 200
+
+    retrieve_resp = client.post(
+        "/retrieve",
+        json={
+            "query": "ABC-123",
+            "filters": {"external_source": "test", "external_id": external_id},
+        },
+    )
+    assert retrieve_resp.status_code == 200
+    artifacts = retrieve_resp.json()["artifacts"]
+    assert artifacts, "expected analysis evidence for ticket query"
+    evidence_id = artifacts[0]["evidence_id"]
+    assert evidence_id.startswith("A-")
+
+    expand_resp = client.post(
+        "/expand",
+        json={"evidence_id": evidence_id, "max_chars": 2000},
+    )
+    assert expand_resp.status_code == 200
+    expanded = expand_resp.json()
+    assert expanded["artifact_chunk_id"] > 0
+    assert "ABC-123" in expanded["snippet"]
 
 
 def test_retrieve_respects_budget(client: TestClient) -> None:

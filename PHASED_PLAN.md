@@ -1,6 +1,6 @@
 # Personal RAG — Phased Implementation Plan (Forward Roadmap)
 **Status:** Canonical  \
-**Last updated:** 2026-02-04
+**Last updated:** 2026-02-06
 
 ## Summary (where we are now)
 **Already implemented and tested:**
@@ -14,12 +14,12 @@
   - `GET /calls`, `GET /calls/{call_id}`, `GET /chunks/{chunk_id}`
   - `POST /expand`
   - `POST /retrieve` (BM25 + tech-token lanes; RRF fusion; budgeted evidence-pack output; `debug` and `ids_only` modes)
+- Analysis retrieval now uses `artifact_chunks` (chunk-level), including `A-<artifact_chunk_id>` evidence IDs and `artifact_chunk:<id>` ids-only responses.
 - Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip, browse/expand, ids-only retrieval, and budget enforcement.
 - FastAPI startup migrated to lifespan (no deprecation warnings).
 
 **Not implemented yet (next):**
 - Dense embeddings lane + pgvector retrieval planner.
-- Analysis artifact chunking into `artifact_chunks` (analysis retrieval units) and switching the artifact lanes + evidence IDs to chunk-level.
 - GPU reranking.
 - `/answer` with citation gating and LLM gateway.
 - Entity extraction + entity filters + faceting.

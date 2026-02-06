@@ -12,7 +12,7 @@ from .schemas import Budget, RetrieveFilters, RetrieveRequest
 
 DEFAULT_RRF_K = 60
 DEFAULT_CHUNK_BM25_TOPK = 50
-DEFAULT_ARTIFACT_BM25_TOPK = 10
+DEFAULT_ARTIFACT_CHUNK_BM25_TOPK = 10
 DEFAULT_TECH_TOPK = 50
 DEFAULT_MAX_ARTIFACTS = 2
 DEFAULT_MAX_QUOTES_PER_CALL = 2
@@ -147,22 +147,22 @@ def _fetch_artifacts_bm25(
     if call_ids == []:
         return []
     where_sql, params, join_calls = _build_filter_clause(
-        filters, "analysis_artifacts", call_ids
+        filters, "artifact_chunks", call_ids
     )
     join_sql = (
-        "JOIN calls c ON c.call_id = analysis_artifacts.call_id" if join_calls else ""
+        "JOIN calls c ON c.call_id = artifact_chunks.call_id" if join_calls else ""
     )
     params.update({"query": query, "limit": limit})
     rows = conn.execute(
         text(
             f"""
-            SELECT artifact_id, call_id, kind, content,
-                   pdb.score(analysis_artifacts) AS score
-            FROM analysis_artifacts
+            SELECT artifact_chunk_id, artifact_id, call_id, kind, content,
+                   pdb.score(artifact_chunks) AS score
+            FROM artifact_chunks
             {join_sql}
             WHERE {where_sql}
-              AND analysis_artifacts.content @@@ :query
-            ORDER BY pdb.score(analysis_artifacts) DESC
+              AND artifact_chunks.content @@@ :query
+            ORDER BY pdb.score(artifact_chunks) DESC
             LIMIT :limit
             """
         ),
@@ -208,21 +208,21 @@ def _fetch_artifacts_tech(
     if call_ids == []:
         return []
     where_sql, params, join_calls = _build_filter_clause(
-        filters, "analysis_artifacts", call_ids
+        filters, "artifact_chunks", call_ids
     )
     join_sql = (
-        "JOIN calls c ON c.call_id = analysis_artifacts.call_id" if join_calls else ""
+        "JOIN calls c ON c.call_id = artifact_chunks.call_id" if join_calls else ""
     )
     params.update({"tech_tokens": list(tokens), "limit": limit})
     rows = conn.execute(
         text(
             f"""
-            SELECT artifact_id, call_id, kind, content
-            FROM analysis_artifacts
+            SELECT artifact_chunk_id, artifact_id, call_id, kind, content
+            FROM artifact_chunks
             {join_sql}
             WHERE {where_sql}
-              AND analysis_artifacts.tech_tokens && :tech_tokens
-            ORDER BY analysis_artifacts.call_started_at DESC, analysis_artifacts.artifact_id ASC
+              AND artifact_chunks.tech_tokens && :tech_tokens
+            ORDER BY artifact_chunks.call_started_at DESC, artifact_chunks.artifact_chunk_id ASC
             LIMIT :limit
             """
         ),
@@ -275,7 +275,7 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
             conn, query, filters, DEFAULT_CHUNK_BM25_TOPK
         )
         bm25_artifacts = _fetch_artifacts_bm25(
-            conn, query, filters, DEFAULT_ARTIFACT_BM25_TOPK
+            conn, query, filters, DEFAULT_ARTIFACT_CHUNK_BM25_TOPK
         )
         tech_chunks = _fetch_chunks_tech(conn, tech_tokens, filters, DEFAULT_TECH_TOPK)
         tech_artifacts = _fetch_artifacts_tech(
@@ -291,13 +291,15 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
                     "tech_tokens": _build_debug_lane(tech_chunks, "chunk_id"),
                 },
                 "artifacts": {
-                    "bm25": _build_debug_lane(bm25_artifacts, "artifact_id"),
-                    "tech_tokens": _build_debug_lane(tech_artifacts, "artifact_id"),
+                    "bm25": _build_debug_lane(bm25_artifacts, "artifact_chunk_id"),
+                    "tech_tokens": _build_debug_lane(
+                        tech_artifacts, "artifact_chunk_id"
+                    ),
                 },
             },
             "limits": {
                 "bm25_chunk_topk": DEFAULT_CHUNK_BM25_TOPK,
-                "bm25_artifact_topk": DEFAULT_ARTIFACT_BM25_TOPK,
+                "bm25_artifact_chunk_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "tech_token_topk": DEFAULT_TECH_TOPK,
             },
         }
@@ -306,16 +308,16 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
         {"bm25": bm25_chunks, "tech_tokens": tech_chunks}, "chunk_id"
     )
     artifact_ranked = _rrf_merge(
-        {"bm25": bm25_artifacts, "tech_tokens": tech_artifacts}, "artifact_id"
+        {"bm25": bm25_artifacts, "tech_tokens": tech_artifacts}, "artifact_chunk_id"
     )
 
     if return_style == "ids_only":
         combined: List[Tuple[str, int, float]] = []
         for row, _lanes, score in artifact_ranked:
-            combined.append(("artifact", row["artifact_id"], score))
+            combined.append(("artifact_chunk", row["artifact_chunk_id"], score))
         for row, _lanes, score in chunk_ranked:
             combined.append(("chunk", row["chunk_id"], score))
-        kind_order = {"artifact": 0, "chunk": 1}
+        kind_order = {"artifact_chunk": 0, "chunk": 1}
         combined.sort(key=lambda item: (-item[2], kind_order[item[0]], item[1]))
         retrieved_ids = [f"{kind}:{item_id}" for kind, item_id, _ in combined]
         response: Dict[str, Any] = {
@@ -344,9 +346,10 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
         remaining_chars -= len(snippet)
         artifacts_out.append(
             {
-                "evidence_id": f"A-{row['artifact_id']}",
+                "evidence_id": f"A-{row['artifact_chunk_id']}",
                 "call_id": str(row["call_id"]),
                 "artifact_id": row["artifact_id"],
+                "artifact_chunk_id": row["artifact_chunk_id"],
                 "kind": row["kind"],
                 "snippet": snippet,
                 "why_relevant": " + ".join(sorted(lanes)),
@@ -391,10 +394,10 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
                 "planner": "lexical_only",
                 "dense_topk": 0,
                 "lex_topk": DEFAULT_CHUNK_BM25_TOPK,
-                "artifact_lex_topk": DEFAULT_ARTIFACT_BM25_TOPK,
+                "artifact_chunk_lex_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "reranked_from": None,
                 "bm25_chunk_topk": DEFAULT_CHUNK_BM25_TOPK,
-                "bm25_artifact_topk": DEFAULT_ARTIFACT_BM25_TOPK,
+                "bm25_artifact_chunk_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "tech_token_topk": DEFAULT_TECH_TOPK,
                 "tech_tokens": tech_tokens,
                 "lanes": {"bm25": True, "tech_tokens": True, "dense": False},

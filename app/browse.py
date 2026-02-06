@@ -296,24 +296,26 @@ def expand_evidence(
         }
 
     if evidence_id.startswith("A-"):
-        artifact_id = int(evidence_id.split("-", 1)[1])
+        artifact_chunk_id = int(evidence_id.split("-", 1)[1])
         with engine.connect() as conn:
             row = conn.execute(
                 text(
                     """
-                    SELECT artifact_id, call_id, content
-                    FROM analysis_artifacts
-                    WHERE artifact_id = :artifact_id
+                    SELECT artifact_chunk_id, artifact_id, call_id, kind, content
+                    FROM artifact_chunks
+                    WHERE artifact_chunk_id = :artifact_chunk_id
                     """
                 ),
-                {"artifact_id": artifact_id},
+                {"artifact_chunk_id": artifact_chunk_id},
             ).mappings().fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="artifact not found")
+            raise HTTPException(status_code=404, detail="artifact chunk not found")
         return {
             "evidence_id": evidence_id,
             "call_id": str(row["call_id"]),
             "artifact_id": row["artifact_id"],
+            "artifact_chunk_id": row["artifact_chunk_id"],
+            "kind": row["kind"],
             "snippet": _clip(row["content"], max_chars),
         }
 

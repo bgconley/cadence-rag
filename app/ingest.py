@@ -31,6 +31,8 @@ TECH_TOKEN_PATTERNS = [
 ]
 
 TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+BULLET_LINE_RE = re.compile(r"^\s*(?:[-*•]|(?:\d+[\.\)]))\s+\S")
+KIND_ITEMIZED = {"action_items", "decisions"}
 
 
 @dataclass
@@ -53,6 +55,16 @@ class ChunkRecord:
     token_count: int
     text: str
     utterance_ids: List[int]
+
+
+@dataclass
+class ArtifactChunkRecord:
+    ordinal: int
+    content: str
+    token_count: int
+    start_char: Optional[int]
+    end_char: Optional[int]
+    tech_tokens: List[str]
 
 
 def _now_utc() -> datetime:
@@ -86,6 +98,136 @@ def _format_utterance_text(utterance: UtteranceRecord) -> str:
     if utterance.speaker:
         return f"{utterance.speaker}: {utterance.text}"
     return utterance.text
+
+
+def _normalize_span(
+    content: str, start: int, end: int
+) -> Optional[Tuple[str, int, int]]:
+    if start >= end:
+        return None
+    raw = content[start:end]
+    left_trim = len(raw) - len(raw.lstrip())
+    right_trim = len(raw) - len(raw.rstrip())
+    span_start = start + left_trim
+    span_end = end - right_trim
+    if span_start >= span_end:
+        return None
+    return content[span_start:span_end], span_start, span_end
+
+
+def _split_paragraph_spans(content: str) -> List[Tuple[str, int, int]]:
+    spans: List[Tuple[str, int, int]] = []
+    start: Optional[int] = None
+    cursor = 0
+
+    for line in content.splitlines(keepends=True):
+        line_start = cursor
+        cursor += len(line)
+        if line.strip():
+            if start is None:
+                start = line_start
+        elif start is not None:
+            span = _normalize_span(content, start, line_start)
+            if span:
+                spans.append(span)
+            start = None
+
+    if start is not None:
+        span = _normalize_span(content, start, len(content))
+        if span:
+            spans.append(span)
+
+    if not spans and content.strip():
+        span = _normalize_span(content, 0, len(content))
+        if span:
+            spans.append(span)
+
+    return spans
+
+
+def _split_bullet_spans(
+    segment_text: str, base_start: int
+) -> List[Tuple[str, int, int]]:
+    spans: List[Tuple[str, int, int]] = []
+    saw_bullet = False
+    current_start: Optional[int] = None
+    cursor = 0
+
+    for line in segment_text.splitlines(keepends=True):
+        line_start = cursor
+        cursor += len(line)
+        if BULLET_LINE_RE.match(line):
+            saw_bullet = True
+            if current_start is not None:
+                span = _normalize_span(segment_text, current_start, line_start)
+                if span:
+                    text_val, rel_start, rel_end = span
+                    spans.append(
+                        (text_val, base_start + rel_start, base_start + rel_end)
+                    )
+            current_start = line_start
+            continue
+
+        if current_start is None and line.strip():
+            current_start = line_start
+
+    if current_start is not None:
+        span = _normalize_span(segment_text, current_start, len(segment_text))
+        if span:
+            text_val, rel_start, rel_end = span
+            spans.append((text_val, base_start + rel_start, base_start + rel_end))
+
+    return spans if saw_bullet else []
+
+
+def build_artifact_chunks(kind: str, content: str) -> List[ArtifactChunkRecord]:
+    chunks: List[ArtifactChunkRecord] = []
+    kind_key = kind.strip().lower()
+    itemize_kind = kind_key in KIND_ITEMIZED
+
+    ordinal = 0
+    for segment_text, segment_start, segment_end in _split_paragraph_spans(content):
+        unit_spans: List[Tuple[str, int, int]]
+        if itemize_kind:
+            bullet_units = _split_bullet_spans(segment_text, segment_start)
+            unit_spans = bullet_units if bullet_units else [
+                (segment_text, segment_start, segment_end)
+            ]
+        else:
+            unit_spans = [(segment_text, segment_start, segment_end)]
+
+        for unit_text, unit_start, unit_end in unit_spans:
+            text_val = unit_text.strip()
+            if not text_val:
+                continue
+            chunks.append(
+                ArtifactChunkRecord(
+                    ordinal=ordinal,
+                    content=text_val,
+                    token_count=count_tokens(text_val),
+                    start_char=unit_start,
+                    end_char=unit_end,
+                    tech_tokens=extract_tech_tokens(text_val),
+                )
+            )
+            ordinal += 1
+
+    if chunks:
+        return chunks
+
+    fallback = content.strip()
+    if not fallback:
+        return []
+    return [
+        ArtifactChunkRecord(
+            ordinal=0,
+            content=fallback,
+            token_count=count_tokens(fallback),
+            start_char=0,
+            end_char=len(fallback),
+            tech_tokens=extract_tech_tokens(fallback),
+        )
+    ]
 
 
 def build_chunks(
@@ -440,13 +582,14 @@ def ingest_analysis(
             content = artifact.content.strip()
             token_count = count_tokens(content)
             tech_tokens = extract_tech_tokens(content)
-            conn.execute(
+            row = conn.execute(
                 text(
                     """
                     INSERT INTO analysis_artifacts
                       (call_id, call_started_at, kind, content, token_count, tech_tokens, metadata)
                     VALUES
                       (:call_id, :call_started_at, :kind, :content, :token_count, :tech_tokens, CAST(:metadata AS jsonb))
+                    RETURNING artifact_id
                     """
                 ),
                 {
@@ -458,11 +601,43 @@ def ingest_analysis(
                     "tech_tokens": tech_tokens,
                     "metadata": json.dumps(artifact.metadata or {}),
                 },
-            )
+            ).fetchone()
+            artifact_id = row[0]
+
+            for chunk in build_artifact_chunks(artifact.kind, content):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO artifact_chunks
+                          (artifact_id, call_id, call_started_at, kind, ordinal, content,
+                           token_count, start_char, end_char, tech_tokens, metadata)
+                        VALUES
+                          (:artifact_id, :call_id, :call_started_at, :kind, :ordinal, :content,
+                           :token_count, :start_char, :end_char, :tech_tokens, CAST(:metadata AS jsonb))
+                        """
+                    ),
+                    {
+                        "artifact_id": artifact_id,
+                        "call_id": call_id,
+                        "call_started_at": call_started_at,
+                        "kind": artifact.kind,
+                        "ordinal": chunk.ordinal,
+                        "content": chunk.content,
+                        "token_count": chunk.token_count,
+                        "start_char": chunk.start_char,
+                        "end_char": chunk.end_char,
+                        "tech_tokens": chunk.tech_tokens,
+                        "metadata": json.dumps(artifact.metadata or {}),
+                    },
+                )
         _record_ingestion_run(
             conn,
             call_id=call_id,
-            chunking_config={"enabled": False, "reason": "analysis-only"},
+            chunking_config={
+                "enabled": True,
+                "mode": "analysis_artifact_chunks_v1",
+                "itemized_kinds": sorted(KIND_ITEMIZED),
+            },
             embedding_config=EMBEDDING_CONFIG_DISABLED,
             ner_config=NER_CONFIG_DISABLED,
         )
