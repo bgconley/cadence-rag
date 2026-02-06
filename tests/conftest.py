@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 from pathlib import Path
+from typing import Iterator
+from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
-DEFAULT_BASE_URL = "postgresql+psycopg://rag:rag@localhost:5432/rag"
-DEFAULT_SCHEMA = "rag_test"
+DEFAULT_BASE_URL = "postgresql+psycopg://rag:rag@10.25.0.50:5432/rag"
+DEFAULT_SCHEMA_PREFIX = "rag_test"
+SAFE_TEST_SCHEMA_RE = re.compile(r"^rag_test(?:_[a-z0-9]+)?$")
 
 
 def _admin_url(url: str) -> str:
@@ -20,14 +25,50 @@ def _admin_url(url: str) -> str:
     return url.split("?", 1)[0]
 
 
+def _resolve_test_schema() -> str:
+    configured_schema = os.getenv("TEST_SCHEMA")
+    schema = configured_schema or f"{DEFAULT_SCHEMA_PREFIX}_{uuid4().hex[:8]}"
+    if not SAFE_TEST_SCHEMA_RE.fullmatch(schema):
+        raise ValueError(
+            "TEST_SCHEMA must match 'rag_test' or 'rag_test_<suffix>' "
+            "to prevent accidental destructive operations."
+        )
+    return schema
+
+
 @pytest.fixture(scope="session")
-def test_database_url() -> str:
+def test_database_url() -> Iterator[str]:
     base_url = os.getenv("TEST_DATABASE_URL", DEFAULT_BASE_URL)
-    schema = os.getenv("TEST_SCHEMA", DEFAULT_SCHEMA)
+    schema = _resolve_test_schema()
     admin_url = _admin_url(base_url)
+    keep_schema = os.getenv("TEST_SCHEMA_KEEP", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     with psycopg.connect(admin_url, autocommit=True) as conn:
-        conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema};")
-    return f"{base_url}?options=-csearch_path={schema},public"
+        conn.execute(
+            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                sql.Identifier(schema)
+            )
+        )
+        conn.execute(
+            sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema))
+        )
+
+    separator = "&" if "?" in base_url else "?"
+    db_url = f"{base_url}{separator}options=-csearch_path={schema},public"
+    yield db_url
+
+    if keep_schema:
+        return
+
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                sql.Identifier(schema)
+            )
+        )
 
 
 @pytest.fixture(scope="session")
