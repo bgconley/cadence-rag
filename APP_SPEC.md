@@ -81,7 +81,7 @@ Retrieval + rerank + evidence-pack compression run deterministically **before** 
 ## 6) Architecture
 
 ### 6.1 Default deployment shape (modular monolith)
-Start as a **single FastAPI service** plus a **background worker** (Celery/RQ/Arq) and separate model inference endpoints if needed.
+Start as a **single FastAPI service** plus a **background worker** (Celery/RQ/Arq), a **filesystem ingest scanner**, and separate model inference endpoints if needed.
 
 ```
 Client (CLI/Web)
@@ -89,10 +89,15 @@ Client (CLI/Web)
    v
 API (FastAPI)
   - ingest endpoints
+  - ingest job status endpoints
   - retrieve endpoint (deterministic)
   - answer endpoint (LLM once, citation-gated)
    |
-   +--> Worker (async jobs: chunking, embeddings, NER, reindex)
+   +--> Redis queue
+   |
+   +--> Scanner (polls ingest/inbox for ready bundles, validates, enqueues)
+   |
+   +--> Worker (async jobs: ingest bundles, chunking, embeddings, NER, reindex)
    |
    +--> Model endpoints (optional separate processes/containers)
          - embeddings
@@ -346,6 +351,41 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ingestion_runs_call_idx ON ingestion_runs (call_id);
+
+-- 10) Ingest jobs (filesystem queue ingest)
+CREATE TABLE IF NOT EXISTS ingest_jobs (
+  ingest_job_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bundle_id         TEXT NOT NULL UNIQUE,      -- stable bundle identifier
+  status            TEXT NOT NULL,             -- queued|running|succeeded|failed|invalid
+  queue_name        TEXT NOT NULL,
+  source_path       TEXT NOT NULL,             -- bundle path in inbox/processing/done/failed
+  manifest_path     TEXT NOT NULL,
+  call_ref          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  call_id           UUID REFERENCES calls(call_id) ON DELETE SET NULL,
+  error             TEXT,
+  attempts          INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at        TIMESTAMPTZ,
+  completed_at      TIMESTAMPTZ,
+  CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'invalid'))
+);
+CREATE INDEX IF NOT EXISTS ingest_jobs_status_created_idx
+  ON ingest_jobs (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS ingest_jobs_call_idx
+  ON ingest_jobs (call_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ingest_job_files (
+  ingest_job_file_id BIGSERIAL PRIMARY KEY,
+  ingest_job_id      UUID NOT NULL REFERENCES ingest_jobs(ingest_job_id) ON DELETE CASCADE,
+  kind               TEXT NOT NULL,            -- manifest|transcript|analysis:<kind>
+  relative_path      TEXT NOT NULL,
+  file_sha256        TEXT NOT NULL,
+  file_size_bytes    BIGINT NOT NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (ingest_job_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS ingest_job_files_job_idx ON ingest_job_files (ingest_job_id);
 ```
 
 ### 7.3 Lexical search with pg_search (BM25)
@@ -401,8 +441,11 @@ Examples:
 - error codes: `ECONNRESET`, `ORA-00001`, `SQLSTATE 23505`
 - versions: `v1.2.3`, `2026.01`
 - commit hashes, IPs, hostnames, URLs, file paths
+- sales/SE domain terms: `BOM`, `build`, `SSD`, `object store`, `tiering`
+- vendor/cloud + competition signals: `Lenovo`, `Dell`, `Supermicro`/`SMC`, `AWS`/`Azure`/`GCP`/`OCI`, `competitive`, `bake-off`, `head-to-head`, `vs`, `incumbent`
 
 This lane provides deterministic matches even if BM25 tokenization/stemming misses edge cases.
+When token extraction rules are updated, run a deterministic `tech_tokens` backfill over existing rows.
 
 ### 7.5 Call linking & provenance (transcript + analysis)
 Support ingesting **transcripts**, **analysis artifacts**, or **both**, while keeping all outputs linked and auditable.
@@ -481,6 +524,51 @@ Provenance storage (recommended in `metadata`):
 ### 8.3 Idempotency and reprocessing
 - Deduplicate ingest by `(source_uri, source_hash)` when possible
 - Pipeline versioning ensures re-chunk/re-embed jobs are traceable
+
+### 8.4 Filesystem ingest queue contract
+Use a deterministic drop-folder contract for unattended ingest:
+
+- Root: `INGEST_ROOT_DIR` (default `./ingest`)
+- Scanner input: `INGEST_ROOT_DIR/inbox/<bundle_id>/`
+- Required files in each bundle directory:
+  - `manifest.json`
+  - `_READY` sentinel (scanner ignores bundles until this exists)
+- Scanner lifecycle directories:
+  - `inbox/` → `processing/` → `done/` (or `failed/`)
+
+`manifest.json` contract:
+```json
+{
+  "bundle_id": "optional-string; defaults to folder name",
+  "call_ref": {
+    "external_source": "gong",
+    "external_id": "abc-123",
+    "started_at": "2026-02-07T18:00:00Z",
+    "title": "Storage architecture call"
+  },
+  "transcript": {
+    "path": "transcript.json",
+    "format": "json_turns",
+    "sha256": "optional sha256 hex",
+    "options": { "target_tokens": 350, "max_tokens": 600, "overlap_tokens": 50 }
+  },
+  "analysis": [
+    {
+      "kind": "summary",
+      "path": "analysis/summary.md",
+      "sha256": "optional sha256 hex",
+      "metadata": { "producer": "post-call-bot" }
+    }
+  ]
+}
+```
+
+Operational behavior:
+- Scanner validates required files and optional `sha256` checks before enqueueing.
+- Scanner writes one row in `ingest_jobs` and per-file metadata in `ingest_job_files`.
+- Worker updates status transitions: `queued` → `running` → `succeeded|failed`.
+- Invalid bundles are marked `invalid` and moved to `failed/`.
+- Job status is observable via `GET /ingest/jobs` and `GET /ingest/jobs/{id}`.
 
 ## 9) Query / retrieval pipeline (deterministic)
 
@@ -630,8 +718,11 @@ Evidence ID formats (for citation gating):
 ## 12) API surface (OpenAPI-oriented)
 
 ### Ingest
+- `POST /ingest/call` (create/update call record from `call_ref`)
 - `POST /ingest/transcript` (accepts `call_ref` for linking)
 - `POST /ingest/analysis` (accepts `call_ref` for linking)
+- `GET /ingest/jobs` (queue status and per-file audit trail)
+- `GET /ingest/jobs/{ingest_job_id}` (single job detail)
 
 ### Retrieval + answering
 - `POST /retrieve` → evidence pack only
@@ -660,6 +751,10 @@ Evidence ID formats (for citation gating):
   - Expose a diagnostics endpoint (DB + extension + model versions)
 - Backups: regular `pg_dump` or filesystem snapshot
 - Config capture: record server + extension versions in a diagnostics endpoint
+- Operational run modes:
+  - First run/new environment: bring up `db` + `redis`, apply migrations, then start `api` + scanner + worker.
+  - Normal run/no schema changes: start services directly; no migration step required.
+  - Post-schema-change run: apply migrations before (re)starting API/worker paths that touch updated tables.
 
 ## 14) Future extensions (explicitly optional)
 - **Graph layer** (Neo4j) only as enrichment after entity extraction stabilizes and you have graph-native use cases

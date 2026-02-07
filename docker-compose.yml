@@ -11,6 +11,12 @@ services:
     volumes:
       - db_data:/var/lib/postgresql
 
+  redis:
+    image: redis:7-alpine
+    container_name: personal_rag_redis
+    ports:
+      - "6379:6379"
+
   api:
     build: .
     container_name: personal_rag_api
@@ -20,10 +26,49 @@ services:
       EXPECTED_PG_SEARCH_VERSION: "0.21.5"
       EXPECTED_PGVECTOR_VERSION: "0.8.1"
       SKIP_VERSION_CHECK: "false"
+      REDIS_URL: redis://redis:6379/0
+      INGEST_QUEUE_NAME: ingest
+      INGEST_ROOT_DIR: /ingest
     ports:
       - "${API_PORT:-8001}:8000"
+    volumes:
+      - ./ingest:/ingest
     depends_on:
       - db
+      - redis
+
+  ingest_worker:
+    build: .
+    container_name: personal_rag_ingest_worker
+    command: ["python", "-m", "app.scripts.ingest_worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag
+      SKIP_VERSION_CHECK: "true"
+      REDIS_URL: redis://redis:6379/0
+      INGEST_QUEUE_NAME: ingest
+      INGEST_ROOT_DIR: /ingest
+    volumes:
+      - ./ingest:/ingest
+    depends_on:
+      - db
+      - redis
+
+  ingest_scanner:
+    build: .
+    container_name: personal_rag_ingest_scanner
+    command: ["python", "-m", "app.scripts.ingest_scanner"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag
+      SKIP_VERSION_CHECK: "true"
+      REDIS_URL: redis://redis:6379/0
+      INGEST_QUEUE_NAME: ingest
+      INGEST_ROOT_DIR: /ingest
+      INGEST_POLL_SECONDS: "5"
+    volumes:
+      - ./ingest:/ingest
+    depends_on:
+      - db
+      - redis
 
 volumes:
   db_data:

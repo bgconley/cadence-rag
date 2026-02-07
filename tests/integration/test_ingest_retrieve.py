@@ -308,3 +308,37 @@ def test_retrieve_respects_budget(client: TestClient) -> None:
     assert total_items <= 1
     for item in body["artifacts"] + body["quotes"]:
         assert len(item["snippet"]) <= 20
+
+
+def test_retrieve_without_embedding_service_stays_functional(
+    client: TestClient,
+) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    transcript_payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "No Dense Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "Service hit ECONNRESET",
+                }
+            ],
+        },
+    }
+    assert client.post("/ingest/transcript", json=transcript_payload).status_code == 200
+
+    retrieve_payload = {"query": "ECONNRESET"}
+    retrieve_resp = client.post("/retrieve", json=retrieve_payload)
+    assert retrieve_resp.status_code == 200
+    body = retrieve_resp.json()
+    assert body["quotes"], "expected lexical retrieval even without dense lane"
+    assert body["notes"]["retrieval"]["planner"] == "lexical_only"
+    assert body["notes"]["retrieval"]["lanes"]["dense"] is False

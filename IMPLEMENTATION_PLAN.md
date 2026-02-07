@@ -76,11 +76,17 @@
   - `(source_uri, source_hash)` detection
   - safe re-run behavior
 - Artifact ingest endpoint (summary/decisions/action items), supporting **analysis-only ingest**
+- Filesystem ingest conveyor:
+  - drop bundles into `INGEST_ROOT_DIR/inbox/<bundle_id>/` with `manifest.json` + `_READY`
+  - scanner validates bundles and enqueues jobs to Redis
+  - RQ worker processes jobs and updates `ingest_jobs` / `ingest_job_files`
+  - status APIs expose queued/running/succeeded/failed/invalid states
 
 ### Acceptance criteria
 - Ingest N calls end-to-end and browse call → chunks → utterances provenance
 - `expand` can reconstruct bounded context deterministically (via `chunk_utterances`)
 - Ingest analysis-only and later transcript; both attach to the same call via `call_ref`
+- Drop-folder ingest works end-to-end without manual API calls per file
 
 ## 4) Phase 2 — Search lanes (BM25 + exact-token + dense)
 **Goal:** implement the three retrieval lanes with stable, explainable outputs.
@@ -88,7 +94,9 @@
 ### Deliverables
 - Technical token extraction (regex/rules) for:
   - ticket IDs, errors, versions, hashes, URLs, file paths, IPs/hosts
+  - sales/SE terms and vendor/cloud aliases (e.g., BOM/build/object-store/tiering, OEM/cloud providers, competition signals)
   - stored in `tech_tokens` arrays
+  - provide a replay/backfill path so historical rows adopt rule updates without full reingest
 - BM25 search using `pg_search` for:
   - chunks.text
   - artifact_chunks.content (preferred for analysis evidence packs)

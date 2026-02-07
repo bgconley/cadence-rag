@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
+from .config import settings
 from .db import engine
+from .embeddings import EmbeddingClientError, embed_texts, embeddings_enabled
 from .ingest import extract_tech_tokens
 from .schemas import Budget, RetrieveFilters, RetrieveRequest
 
 DEFAULT_RRF_K = 60
 DEFAULT_CHUNK_BM25_TOPK = 50
 DEFAULT_ARTIFACT_CHUNK_BM25_TOPK = 10
+DEFAULT_DENSE_CHUNK_TOPK = 50
+DEFAULT_DENSE_ARTIFACT_CHUNK_TOPK = 10
 DEFAULT_TECH_TOPK = 50
 DEFAULT_MAX_ARTIFACTS = 2
 DEFAULT_MAX_QUOTES_PER_CALL = 2
@@ -44,7 +47,9 @@ def _resolve_call_ids(
     if not filters:
         return None
 
-    call_ids: Optional[Set[UUID]] = set(filters.call_ids or [])
+    call_ids: Optional[Set[UUID]] = (
+        set(filters.call_ids) if filters.call_ids else None
+    )
     if filters.external_id:
         if filters.external_source is None:
             rows = conn.execute(
@@ -80,7 +85,7 @@ def _resolve_call_ids(
 
     if call_ids is None:
         return None
-    return list(call_ids)
+    return sorted(call_ids, key=str)
 
 
 def _build_filter_clause(
@@ -99,7 +104,7 @@ def _build_filter_clause(
         if filters.date_to:
             clauses.append(f"{alias}.call_started_at <= :date_to")
             params["date_to"] = filters.date_to
-        if call_ids:
+        if call_ids is not None:
             clauses.append(f"{alias}.call_id = ANY(:call_ids)")
             params["call_ids"] = list(call_ids)
         if filters.call_tags:
@@ -114,11 +119,12 @@ def _build_filter_clause(
 
 
 def _fetch_chunks_bm25(
-    conn, query: str, filters: Optional[RetrieveFilters], limit: int
+    conn,
+    query: str,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    limit: int,
 ) -> List[Dict[str, Any]]:
-    call_ids = _resolve_call_ids(conn, filters)
-    if call_ids == []:
-        return []
     where_sql, params, join_calls = _build_filter_clause(filters, "chunks", call_ids)
     join_sql = "JOIN calls c ON c.call_id = chunks.call_id" if join_calls else ""
     params.update({"query": query, "limit": limit})
@@ -141,11 +147,12 @@ def _fetch_chunks_bm25(
 
 
 def _fetch_artifacts_bm25(
-    conn, query: str, filters: Optional[RetrieveFilters], limit: int
+    conn,
+    query: str,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    limit: int,
 ) -> List[Dict[str, Any]]:
-    call_ids = _resolve_call_ids(conn, filters)
-    if call_ids == []:
-        return []
     where_sql, params, join_calls = _build_filter_clause(
         filters, "artifact_chunks", call_ids
     )
@@ -172,12 +179,13 @@ def _fetch_artifacts_bm25(
 
 
 def _fetch_chunks_tech(
-    conn, tokens: Sequence[str], filters: Optional[RetrieveFilters], limit: int
+    conn,
+    tokens: Sequence[str],
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    limit: int,
 ) -> List[Dict[str, Any]]:
     if not tokens:
-        return []
-    call_ids = _resolve_call_ids(conn, filters)
-    if call_ids == []:
         return []
     where_sql, params, join_calls = _build_filter_clause(filters, "chunks", call_ids)
     join_sql = "JOIN calls c ON c.call_id = chunks.call_id" if join_calls else ""
@@ -200,12 +208,13 @@ def _fetch_chunks_tech(
 
 
 def _fetch_artifacts_tech(
-    conn, tokens: Sequence[str], filters: Optional[RetrieveFilters], limit: int
+    conn,
+    tokens: Sequence[str],
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    limit: int,
 ) -> List[Dict[str, Any]]:
     if not tokens:
-        return []
-    call_ids = _resolve_call_ids(conn, filters)
-    if call_ids == []:
         return []
     where_sql, params, join_calls = _build_filter_clause(
         filters, "artifact_chunks", call_ids
@@ -249,6 +258,134 @@ def _rrf_merge(
     return [(items[key], lane_hits[key], score) for key, score in ordered]
 
 
+def _vector_literal(values: Sequence[float]) -> str:
+    return "[" + ",".join(format(float(value), ".10g") for value in values) + "]"
+
+
+def _dense_has_scoping(
+    filters: Optional[RetrieveFilters], call_ids: Optional[Sequence[UUID]]
+) -> bool:
+    if call_ids is not None:
+        return True
+    if not filters:
+        return False
+    return bool(filters.date_from or filters.date_to or filters.call_tags)
+
+
+def _choose_dense_mode(
+    estimated_rows: int,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+) -> str:
+    if estimated_rows <= 0:
+        return "exact"
+    if _dense_has_scoping(filters, call_ids):
+        if estimated_rows <= max(settings.embeddings_exact_scan_threshold, 0):
+            return "exact"
+    return "ann"
+
+
+def _configure_dense_session(conn, mode: str) -> None:
+    if mode == "ann":
+        conn.execute(text("SET LOCAL enable_indexscan = on"))
+        conn.execute(text("SET LOCAL enable_bitmapscan = on"))
+        conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+        conn.execute(
+            text("SET LOCAL hnsw.ef_search = :ef_search"),
+            {"ef_search": settings.embeddings_hnsw_ef_search},
+        )
+        return
+    conn.execute(text("SET LOCAL enable_indexscan = off"))
+    conn.execute(text("SET LOCAL enable_bitmapscan = off"))
+
+
+def _estimate_dense_candidates(
+    conn,
+    table_name: str,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+) -> int:
+    where_sql, params, join_calls = _build_filter_clause(filters, table_name, call_ids)
+    join_sql = f"JOIN calls c ON c.call_id = {table_name}.call_id" if join_calls else ""
+    row = conn.execute(
+        text(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM {table_name}
+            {join_sql}
+            WHERE {where_sql}
+              AND {table_name}.embedding IS NOT NULL
+            """
+        ),
+        params,
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _fetch_chunks_dense(
+    conn,
+    query_embedding: str,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    mode: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    _configure_dense_session(conn, mode)
+    where_sql, params, join_calls = _build_filter_clause(filters, "chunks", call_ids)
+    join_sql = "JOIN calls c ON c.call_id = chunks.call_id" if join_calls else ""
+    params.update({"query_embedding": query_embedding, "limit": limit})
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT chunk_id, call_id, speaker, start_ts_ms, end_ts_ms, text,
+                   (1 - (chunks.embedding <=> CAST(:query_embedding AS vector(1024)))) AS score
+            FROM chunks
+            {join_sql}
+            WHERE {where_sql}
+              AND chunks.embedding IS NOT NULL
+            ORDER BY chunks.embedding <=> CAST(:query_embedding AS vector(1024))
+            LIMIT :limit
+            """
+        ),
+        params,
+    ).mappings()
+    return list(rows)
+
+
+def _fetch_artifacts_dense(
+    conn,
+    query_embedding: str,
+    filters: Optional[RetrieveFilters],
+    call_ids: Optional[Sequence[UUID]],
+    mode: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    _configure_dense_session(conn, mode)
+    where_sql, params, join_calls = _build_filter_clause(
+        filters, "artifact_chunks", call_ids
+    )
+    join_sql = (
+        "JOIN calls c ON c.call_id = artifact_chunks.call_id" if join_calls else ""
+    )
+    params.update({"query_embedding": query_embedding, "limit": limit})
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT artifact_chunk_id, artifact_id, call_id, kind, content,
+                   (1 - (artifact_chunks.embedding <=> CAST(:query_embedding AS vector(1024)))) AS score
+            FROM artifact_chunks
+            {join_sql}
+            WHERE {where_sql}
+              AND artifact_chunks.embedding IS NOT NULL
+            ORDER BY artifact_chunks.embedding <=> CAST(:query_embedding AS vector(1024))
+            LIMIT :limit
+            """
+        ),
+        params,
+    ).mappings()
+    return list(rows)
+
+
 def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
     query_id = str(uuid4())
     query = payload.query.strip()
@@ -269,47 +406,137 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
 
     filters = payload.filters
     tech_tokens = extract_tech_tokens(query)
+    dense_enabled = embeddings_enabled()
+    dense_error: Optional[str] = None
+    dense_model_id: Optional[str] = None
+    query_embedding: Optional[str] = None
+
+    if dense_enabled:
+        try:
+            embedded = embed_texts([query])
+            dense_model_id = embedded.model
+            query_embedding = _vector_literal(embedded.vectors[0])
+        except EmbeddingClientError as exc:
+            dense_enabled = False
+            dense_error = str(exc)
+
+    bm25_chunks: List[Dict[str, Any]] = []
+    bm25_artifacts: List[Dict[str, Any]] = []
+    tech_chunks: List[Dict[str, Any]] = []
+    tech_artifacts: List[Dict[str, Any]] = []
+    dense_chunks: List[Dict[str, Any]] = []
+    dense_artifacts: List[Dict[str, Any]] = []
+    chunk_dense_mode: Optional[str] = None
+    artifact_dense_mode: Optional[str] = None
+    chunk_dense_candidates = 0
+    artifact_dense_candidates = 0
 
     with engine.connect() as conn:
+        call_ids = _resolve_call_ids(conn, filters)
         bm25_chunks = _fetch_chunks_bm25(
-            conn, query, filters, DEFAULT_CHUNK_BM25_TOPK
+            conn, query, filters, call_ids, DEFAULT_CHUNK_BM25_TOPK
         )
         bm25_artifacts = _fetch_artifacts_bm25(
-            conn, query, filters, DEFAULT_ARTIFACT_CHUNK_BM25_TOPK
+            conn, query, filters, call_ids, DEFAULT_ARTIFACT_CHUNK_BM25_TOPK
         )
-        tech_chunks = _fetch_chunks_tech(conn, tech_tokens, filters, DEFAULT_TECH_TOPK)
+        tech_chunks = _fetch_chunks_tech(
+            conn, tech_tokens, filters, call_ids, DEFAULT_TECH_TOPK
+        )
         tech_artifacts = _fetch_artifacts_tech(
-            conn, tech_tokens, filters, DEFAULT_TECH_TOPK
+            conn, tech_tokens, filters, call_ids, DEFAULT_TECH_TOPK
         )
+        if dense_enabled and query_embedding is not None:
+            chunk_dense_candidates = _estimate_dense_candidates(
+                conn, "chunks", filters, call_ids
+            )
+            artifact_dense_candidates = _estimate_dense_candidates(
+                conn, "artifact_chunks", filters, call_ids
+            )
+            chunk_dense_mode = _choose_dense_mode(
+                chunk_dense_candidates, filters, call_ids
+            )
+            artifact_dense_mode = _choose_dense_mode(
+                artifact_dense_candidates, filters, call_ids
+            )
+            dense_chunks = _fetch_chunks_dense(
+                conn,
+                query_embedding,
+                filters,
+                call_ids,
+                chunk_dense_mode,
+                DEFAULT_DENSE_CHUNK_TOPK,
+            )
+            dense_artifacts = _fetch_artifacts_dense(
+                conn,
+                query_embedding,
+                filters,
+                call_ids,
+                artifact_dense_mode,
+                DEFAULT_DENSE_ARTIFACT_CHUNK_TOPK,
+            )
 
     debug_payload = None
     if payload.debug:
+        chunk_lanes_debug = {
+            "bm25": _build_debug_lane(bm25_chunks, "chunk_id"),
+            "tech_tokens": _build_debug_lane(tech_chunks, "chunk_id"),
+        }
+        artifact_lanes_debug = {
+            "bm25": _build_debug_lane(bm25_artifacts, "artifact_chunk_id"),
+            "tech_tokens": _build_debug_lane(
+                tech_artifacts, "artifact_chunk_id"
+            ),
+        }
+        if dense_enabled:
+            chunk_lanes_debug["dense"] = _build_debug_lane(
+                dense_chunks, "chunk_id"
+            )
+            artifact_lanes_debug["dense"] = _build_debug_lane(
+                dense_artifacts, "artifact_chunk_id"
+            )
         debug_payload = {
             "lanes": {
-                "chunks": {
-                    "bm25": _build_debug_lane(bm25_chunks, "chunk_id"),
-                    "tech_tokens": _build_debug_lane(tech_chunks, "chunk_id"),
-                },
-                "artifacts": {
-                    "bm25": _build_debug_lane(bm25_artifacts, "artifact_chunk_id"),
-                    "tech_tokens": _build_debug_lane(
-                        tech_artifacts, "artifact_chunk_id"
-                    ),
-                },
+                "chunks": chunk_lanes_debug,
+                "artifacts": artifact_lanes_debug,
             },
             "limits": {
                 "bm25_chunk_topk": DEFAULT_CHUNK_BM25_TOPK,
                 "bm25_artifact_chunk_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "tech_token_topk": DEFAULT_TECH_TOPK,
+                "dense_chunk_topk": DEFAULT_DENSE_CHUNK_TOPK if dense_enabled else 0,
+                "dense_artifact_chunk_topk": (
+                    DEFAULT_DENSE_ARTIFACT_CHUNK_TOPK if dense_enabled else 0
+                ),
+            },
+            "dense": {
+                "enabled": dense_enabled,
+                "model_id": dense_model_id,
+                "error": dense_error,
+                "modes": {
+                    "chunks": chunk_dense_mode,
+                    "artifact_chunks": artifact_dense_mode,
+                },
+                "candidate_rows": {
+                    "chunks": chunk_dense_candidates,
+                    "artifact_chunks": artifact_dense_candidates,
+                },
             },
         }
 
-    chunk_ranked = _rrf_merge(
-        {"bm25": bm25_chunks, "tech_tokens": tech_chunks}, "chunk_id"
-    )
-    artifact_ranked = _rrf_merge(
-        {"bm25": bm25_artifacts, "tech_tokens": tech_artifacts}, "artifact_chunk_id"
-    )
+    chunk_lanes: Dict[str, Sequence[Dict[str, Any]]] = {
+        "bm25": bm25_chunks,
+        "tech_tokens": tech_chunks,
+    }
+    artifact_lanes: Dict[str, Sequence[Dict[str, Any]]] = {
+        "bm25": bm25_artifacts,
+        "tech_tokens": tech_artifacts,
+    }
+    if dense_enabled:
+        chunk_lanes["dense"] = dense_chunks
+        artifact_lanes["dense"] = dense_artifacts
+
+    chunk_ranked = _rrf_merge(chunk_lanes, "chunk_id")
+    artifact_ranked = _rrf_merge(artifact_lanes, "artifact_chunk_id")
 
     if return_style == "ids_only":
         combined: List[Tuple[str, int, float]] = []
@@ -391,8 +618,23 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
         "quotes": quotes_out,
         "notes": {
             "retrieval": {
-                "planner": "lexical_only",
-                "dense_topk": 0,
+                "planner": (
+                    "lexical_only"
+                    if not dense_enabled
+                    else (
+                        "ann"
+                        if (
+                            chunk_dense_mode == "ann"
+                            or artifact_dense_mode == "ann"
+                        )
+                        else "exact"
+                    )
+                ),
+                "dense_topk": (
+                    max(DEFAULT_DENSE_CHUNK_TOPK, DEFAULT_DENSE_ARTIFACT_CHUNK_TOPK)
+                    if dense_enabled
+                    else 0
+                ),
                 "lex_topk": DEFAULT_CHUNK_BM25_TOPK,
                 "artifact_chunk_lex_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "reranked_from": None,
@@ -400,7 +642,20 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
                 "bm25_artifact_chunk_topk": DEFAULT_ARTIFACT_CHUNK_BM25_TOPK,
                 "tech_token_topk": DEFAULT_TECH_TOPK,
                 "tech_tokens": tech_tokens,
-                "lanes": {"bm25": True, "tech_tokens": True, "dense": False},
+                "lanes": {"bm25": True, "tech_tokens": True, "dense": dense_enabled},
+                "dense_model_id": dense_model_id,
+                "dense_error": dense_error,
+                "dense_modes": {
+                    "chunks": chunk_dense_mode,
+                    "artifact_chunks": artifact_dense_mode,
+                },
+                "dense_candidate_rows": {
+                    "chunks": chunk_dense_candidates,
+                    "artifact_chunks": artifact_dense_candidates,
+                },
+                "hnsw_ef_search": (
+                    settings.embeddings_hnsw_ef_search if dense_enabled else None
+                ),
             }
         },
     }

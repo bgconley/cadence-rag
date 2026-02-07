@@ -1,6 +1,6 @@
 # Personal RAG — Phased Implementation Plan (Forward Roadmap)
 **Status:** Canonical  \
-**Last updated:** 2026-02-06
+**Last updated:** 2026-02-07
 
 ## Summary (where we are now)
 **Already implemented and tested:**
@@ -11,10 +11,15 @@
   - `POST /ingest/call`
   - `POST /ingest/transcript` (currently `json_turns` only)
   - `POST /ingest/analysis` (supports analysis-only ingest)
+  - `GET /ingest/jobs`, `GET /ingest/jobs/{ingest_job_id}`
   - `GET /calls`, `GET /calls/{call_id}`, `GET /chunks/{chunk_id}`
   - `POST /expand`
   - `POST /retrieve` (BM25 + tech-token lanes; RRF fusion; budgeted evidence-pack output; `debug` and `ids_only` modes)
 - Analysis retrieval now uses `artifact_chunks` (chunk-level), including `A-<artifact_chunk_id>` evidence IDs and `artifact_chunk:<id>` ids-only responses.
+- Filesystem ingest queue baseline:
+  - drop-folder contract (`ingest/inbox/<bundle_id>/manifest.json` + `_READY`)
+  - scanner validates and enqueues to Redis
+  - RQ worker processes jobs and tracks status in `ingest_jobs`/`ingest_job_files`
 - Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip, browse/expand, ids-only retrieval, and budget enforcement.
 - FastAPI startup migrated to lifespan (no deprecation warnings).
 
@@ -63,7 +68,7 @@
 
 5) **Start recording ingestion configs**
    - On ingest transcript and ingest analysis: insert an `ingestion_runs` row capturing:
-     - `pipeline_version` (start at `"v1"`)
+     - `pipeline_version` (currently `"v2"`; bump whenever chunking/token/NER rules change)
      - `chunking_config` (actual options used)
      - `embedding_config` (even if embeddings are disabled: `{enabled:false, model_id:null, dim:1024}`)
      - `ner_config` (even if disabled)
@@ -159,6 +164,58 @@
 ### Acceptance criteria
 - Analysis retrieval is chunk-granular and budget-friendly; snippets are relevant.
 - Evidence IDs are stable and can round-trip through `/expand`.
+
+---
+
+## Phase 2D — Filesystem ingest queue (`inbox` scanner + Redis worker)
+**Goal:** support unattended ingest by dropping bundles into a watched directory, with deterministic validation and observable job status.
+
+### Deliverables
+1) **Schema: ingest jobs + file audit tables**
+   - Add `ingest_jobs`:
+     - `bundle_id`, `status`, `queue_name`, `source_path`, `manifest_path`, `call_ref`, `call_id`, `error`, `attempts`, timestamps
+   - Add `ingest_job_files`:
+     - one row per file (`kind`, `relative_path`, `file_sha256`, `file_size_bytes`)
+
+2) **Filesystem bundle contract**
+   - Root from `INGEST_ROOT_DIR` with subdirs:
+     - `inbox/`, `processing/`, `done/`, `failed/`
+   - Bundle is ready only when `_READY` sentinel exists.
+   - Required `manifest.json` with:
+     - `call_ref`
+     - optional transcript descriptor (`path`, `format=json_turns`, optional `sha256`, optional chunking options)
+     - optional analysis file descriptors (`kind`, `path`, optional `sha256`, optional metadata)
+
+3) **Scanner service**
+   - Polls `inbox/` on interval.
+   - Validates bundle and optional checksums.
+   - Moves valid bundles to `processing/`.
+   - Enqueues job ID in Redis queue.
+   - Marks invalid bundles and moves to `failed/`.
+
+4) **Worker service**
+   - Consumes queue jobs.
+   - Executes ingest pipeline:
+     - resolve/create call from `call_ref`
+     - transcript ingest (if present)
+     - analysis ingest (if present)
+   - Transitions status:
+     - `queued` → `running` → `succeeded|failed`
+   - Moves processed bundle to `done/` or `failed/`.
+
+5) **Job visibility API**
+   - `GET /ingest/jobs`
+   - `GET /ingest/jobs/{ingest_job_id}`
+
+### Tests
+- Unit: manifest validation (required files, path safety, checksum mismatch).
+- Integration: ingest job endpoints return expected status and file audit payload.
+- Smoke: scanner `--once` works and worker entrypoint boots.
+
+### Acceptance criteria
+- A valid bundle dropped into `inbox/` is ingested end-to-end without manual API calls.
+- Invalid bundles never enter retrieval tables and are observable as `invalid|failed`.
+- Job status is queryable via API for operational debugging.
 
 ---
 

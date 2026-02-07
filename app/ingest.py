@@ -14,7 +14,7 @@ from .config import settings
 from .db import engine
 from .schemas import AnalysisArtifactIn, CallRef, ChunkingOptions, UtteranceIn
 
-PIPELINE_VERSION = "v1"
+PIPELINE_VERSION = "v2"
 EMBEDDING_CONFIG_DISABLED = {"enabled": False, "model_id": None, "dim": 1024}
 NER_CONFIG_DISABLED = {"enabled": False}
 
@@ -28,6 +28,45 @@ TECH_TOKEN_PATTERNS = [
     re.compile(r"\bv?\d+\.\d+(?:\.\d+)?\b"),  # versions
     re.compile(r"\b[a-f0-9]{7,40}\b", re.IGNORECASE),  # commit hashes
     re.compile(r"(?:/[\w.\-]+)+"),  # file paths
+]
+
+# Domain lexicon keeps the exact-token lane relevant for sales/SE call retrieval.
+DOMAIN_TECH_TOKEN_RULES = [
+    (re.compile(r"\bbill of materials\b", re.IGNORECASE), "BOM"),
+    (re.compile(r"\bbom\b", re.IGNORECASE), "BOM"),
+    (re.compile(r"\bbuild(?:s|ing)?\b", re.IGNORECASE), "build"),
+    (re.compile(r"\bssd\b", re.IGNORECASE), "SSD"),
+    (
+        re.compile(r"\bobject\s+(?:store|storage)\b", re.IGNORECASE),
+        "object store",
+    ),
+    (re.compile(r"\bobject\b", re.IGNORECASE), "object"),
+    (re.compile(r"\btiering\b", re.IGNORECASE), "tiering"),
+    (re.compile(r"\blenovo\b", re.IGNORECASE), "Lenovo"),
+    (re.compile(r"\bdell\b", re.IGNORECASE), "Dell"),
+    (re.compile(r"\bsuper[\s-]?micro\b|\bsmc\b", re.IGNORECASE), "Supermicro"),
+    (
+        re.compile(r"\baws\b|\bamazon web services\b", re.IGNORECASE),
+        "AWS",
+    ),
+    (re.compile(r"\bamazon\b", re.IGNORECASE), "Amazon"),
+    (re.compile(r"\bazure\b", re.IGNORECASE), "Azure"),
+    (re.compile(r"\bmicrosoft\b", re.IGNORECASE), "Microsoft"),
+    (
+        re.compile(r"\bgcp\b|\bgoogle cloud(?: platform)?\b", re.IGNORECASE),
+        "GCP",
+    ),
+    (re.compile(r"\bgoogle\b", re.IGNORECASE), "Google"),
+    (
+        re.compile(r"\boci\b|\boracle cloud(?: infrastructure)?\b", re.IGNORECASE),
+        "OCI",
+    ),
+    (re.compile(r"\boracle\b", re.IGNORECASE), "Oracle"),
+    (re.compile(r"\bcompet(?:e|es|ing|ition|itive|itor|itors)\b", re.IGNORECASE), "competitive"),
+    (re.compile(r"\bincumbent\b", re.IGNORECASE), "incumbent"),
+    (re.compile(r"\bbake[\s-]?off\b", re.IGNORECASE), "bake-off"),
+    (re.compile(r"\bhead[\s-]?to[\s-]?head\b", re.IGNORECASE), "head-to-head"),
+    (re.compile(r"\bvs\.?(?=\s|$)|\bversus\b", re.IGNORECASE), "vs"),
 ]
 
 TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -79,6 +118,9 @@ def extract_tech_tokens(text: str) -> List[str]:
     tokens: List[str] = []
     for pattern in TECH_TOKEN_PATTERNS:
         tokens.extend(pattern.findall(text))
+    for pattern, canonical in DOMAIN_TECH_TOKEN_RULES:
+        if pattern.search(text):
+            tokens.append(canonical)
     # normalize and dedupe while preserving order
     seen = set()
     result = []

@@ -28,6 +28,34 @@ def test_extract_tech_tokens() -> None:
     assert expected.issubset(set(tokens))
 
 
+def test_extract_tech_tokens_sales_se_lexicon() -> None:
+    text = (
+        "The build BOM uses SSD with object store tiering on Lenovo and SMC. "
+        "We are in a competitive bake-off head-to-head vs incumbent options: "
+        "AWS (Amazon), Azure (Microsoft), GCP (Google Cloud), OCI (Oracle)."
+    )
+    tokens = set(extract_tech_tokens(text))
+    expected = {
+        "build",
+        "BOM",
+        "SSD",
+        "object store",
+        "tiering",
+        "Lenovo",
+        "Supermicro",
+        "competitive",
+        "bake-off",
+        "head-to-head",
+        "vs",
+        "incumbent",
+        "AWS",
+        "Azure",
+        "GCP",
+        "OCI",
+    }
+    assert expected.issubset(tokens)
+
+
 def test_build_chunks_respects_max_tokens() -> None:
     utterances = [
         UtteranceRecord(

@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from .browse import expand_evidence, get_call, get_chunk, list_calls
 from .config import settings
 from .db import fetch_db_info, validate_versions
+from .ingest_fs import get_ingest_job, list_ingest_jobs
 from .ingest import ingest_analysis, ingest_call, ingest_transcript
 from .retrieve import retrieve_evidence
 from .schemas import (
@@ -91,6 +92,25 @@ def ingest_analysis_endpoint(payload: AnalysisIngestRequest) -> dict:
         artifacts=payload.artifacts,
     )
     return {"call_id": str(call_id), "artifacts_created": created}
+
+
+@app.get("/ingest/jobs")
+def list_ingest_jobs_endpoint(
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    allowed = {"queued", "running", "succeeded", "failed", "invalid"}
+    if status is not None and status not in allowed:
+        raise HTTPException(status_code=400, detail="invalid ingest job status filter")
+    return list_ingest_jobs(status=status, limit=limit)
+
+
+@app.get("/ingest/jobs/{ingest_job_id}")
+def get_ingest_job_endpoint(ingest_job_id: UUID) -> dict:
+    try:
+        return get_ingest_job(ingest_job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/calls")
