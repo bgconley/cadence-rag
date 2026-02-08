@@ -140,3 +140,58 @@ def test_load_analysis_content_pdf_uses_pdf_adapter(
 
     content = load_analysis_content(pdf_path, format_hint="auto")
     assert content == "pdf-text"
+
+
+def test_pdf_ocr_fallback_used_for_low_quality_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(
+        ingest_adapters,
+        "_extract_pdf_text_with_pypdf",
+        lambda path: ("", 2),
+    )
+    monkeypatch.setattr(
+        ingest_adapters,
+        "_pdf_to_text_via_ocrmypdf",
+        lambda path: "OCR recovered text",
+    )
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_enabled", True)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_min_chars", 20)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_min_alpha_ratio", 0.5)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_max_pages", 10)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_force", False)
+
+    content = load_analysis_content(pdf_path, format_hint="pdf")
+    assert content == "OCR recovered text"
+
+
+def test_pdf_ocr_fallback_skipped_for_high_quality_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "text.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    baseline = "This is a normal page with readable extracted text."
+    monkeypatch.setattr(
+        ingest_adapters,
+        "_extract_pdf_text_with_pypdf",
+        lambda path: (baseline, 1),
+    )
+
+    called = {"value": False}
+
+    def _mock_ocr(path: Path) -> str:
+        called["value"] = True
+        return "SHOULD NOT BE USED"
+
+    monkeypatch.setattr(ingest_adapters, "_pdf_to_text_via_ocrmypdf", _mock_ocr)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_enabled", True)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_min_chars", 10)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_min_alpha_ratio", 0.2)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_max_pages", 10)
+    monkeypatch.setattr(ingest_adapters.settings, "analysis_pdf_ocr_force", False)
+
+    content = load_analysis_content(pdf_path, format_hint="pdf")
+    assert content == baseline
+    assert called["value"] is False

@@ -174,7 +174,30 @@ Filesystem ingest format notes:
 - Transcript `format` supports `json_turns` (strict), `markdown_turns` (speaker/timestamp Markdown transcripts), and `auto` (adapter normalization).
 - Analysis `format` supports `auto`, `text`, `markdown`, `csv`, `tsv`, `json`, `html`, `docx`, and `pdf`.
 - With `auto`, transcript/analysis files are normalized by extension/content so table-heavy exports can still be ingested.
+- PDF extraction uses native text extraction first. Optional OCR fallback can be enabled for scanned PDFs when extracted text quality is low.
 - Auto-manifest mode can be disabled with `INGEST_AUTO_MANIFEST=false` (then `manifest.json` is required).
+
+Optional OCR fallback for scanned PDFs:
+```bash
+# Docker mode: rebuild images so worker/scanner have OCR dependencies
+docker compose build api ingest_worker ingest_scanner
+
+# Local uv mode (no containers): install OCR tools on host once
+sudo apt-get update
+sudo apt-get install -y ocrmypdf tesseract-ocr ghostscript
+```
+
+`.env` controls:
+```bash
+ANALYSIS_PDF_OCR_ENABLED=true
+ANALYSIS_PDF_OCR_COMMAND=ocrmypdf
+ANALYSIS_PDF_OCR_LANGUAGES=eng
+ANALYSIS_PDF_OCR_MIN_CHARS=400
+ANALYSIS_PDF_OCR_MIN_ALPHA_RATIO=0.55
+ANALYSIS_PDF_OCR_MAX_PAGES=150
+ANALYSIS_PDF_OCR_TIMEOUT_S=600
+ANALYSIS_PDF_OCR_FORCE=false
+```
 
 Check job status:
 ```bash

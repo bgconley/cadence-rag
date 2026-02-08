@@ -3,10 +3,15 @@ from __future__ import annotations
 import csv
 import html
 import json
+import logging
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from .config import settings
 from .schemas import TranscriptPayload
 
 TURN_LIST_KEYS = (
@@ -58,6 +63,7 @@ MARKDOWN_SPEAKER_RE = re.compile(
 MARKDOWN_TS_RE = re.compile(
     r"^\s*\*?(?:(?P<hours>\d{1,2}):)?(?P<minutes>[0-5]?\d):(?P<seconds>[0-5]?\d)\*?\s*$"
 )
+logger = logging.getLogger(__name__)
 
 
 def load_transcript_payload(path: Path, *, format_hint: str = "json_turns") -> TranscriptPayload:
@@ -159,6 +165,24 @@ def _docx_to_text(path: Path) -> str:
 
 
 def _pdf_to_text(path: Path) -> str:
+    extracted_text, page_count = _extract_pdf_text_with_pypdf(path)
+
+    if not settings.analysis_pdf_ocr_enabled:
+        return extracted_text
+
+    if not _should_run_pdf_ocr(extracted_text, page_count):
+        return extracted_text
+
+    ocr_text = _pdf_to_text_via_ocrmypdf(path)
+    if not ocr_text:
+        return extracted_text
+
+    if _is_better_pdf_text(candidate=ocr_text, baseline=extracted_text):
+        return ocr_text
+    return extracted_text or ocr_text
+
+
+def _extract_pdf_text_with_pypdf(path: Path) -> tuple[str, int]:
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover
@@ -173,7 +197,100 @@ def _pdf_to_text(path: Path) -> str:
         if not text:
             continue
         pages.append(f"## Page {index}\n\n{text}")
-    return "\n\n".join(pages).strip()
+    return "\n\n".join(pages).strip(), len(reader.pages)
+
+
+def _should_run_pdf_ocr(extracted_text: str, page_count: int) -> bool:
+    if page_count <= 0:
+        return False
+    if page_count > settings.analysis_pdf_ocr_max_pages:
+        logger.info(
+            "pdf_ocr.skipped page_count=%s max_pages=%s",
+            page_count,
+            settings.analysis_pdf_ocr_max_pages,
+        )
+        return False
+    if settings.analysis_pdf_ocr_force:
+        return True
+
+    text_char_count, alpha_ratio = _pdf_text_quality(extracted_text)
+    if text_char_count < settings.analysis_pdf_ocr_min_chars:
+        return True
+    if alpha_ratio < settings.analysis_pdf_ocr_min_alpha_ratio:
+        return True
+    return False
+
+
+def _pdf_to_text_via_ocrmypdf(path: Path) -> str:
+    ocr_command = settings.analysis_pdf_ocr_command.strip()
+    if not ocr_command:
+        return ""
+
+    if shutil.which(ocr_command) is None:
+        logger.warning("pdf_ocr.command_missing command=%s", ocr_command)
+        return ""
+
+    with tempfile.TemporaryDirectory(prefix="cadence-rag-ocr-") as temp_dir:
+        sidecar_path = Path(temp_dir) / "ocr_sidecar.txt"
+        output_pdf_path = Path(temp_dir) / "ocr_output.pdf"
+        cmd = [
+            ocr_command,
+            "--skip-text",
+            "--quiet",
+            "--sidecar",
+            str(sidecar_path),
+            "--language",
+            settings.analysis_pdf_ocr_languages,
+            str(path),
+            str(output_pdf_path),
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=settings.analysis_pdf_ocr_timeout_s,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("pdf_ocr.execution_error error=%s", str(exc))
+            return ""
+
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            logger.warning(
+                "pdf_ocr.failed command=%s returncode=%s stderr=%s",
+                ocr_command,
+                completed.returncode,
+                stderr[:200],
+            )
+            return ""
+
+        if sidecar_path.exists():
+            return sidecar_path.read_text(encoding="utf-8", errors="replace").strip()
+
+        text, _ = _extract_pdf_text_with_pypdf(output_pdf_path)
+        return text
+
+
+def _pdf_text_quality(text: str) -> tuple[int, float]:
+    non_ws_count = sum(1 for ch in text if not ch.isspace())
+    if non_ws_count == 0:
+        return 0, 0.0
+    alpha_chars = sum(1 for ch in text if ch.isalpha())
+    return non_ws_count, alpha_chars / non_ws_count
+
+
+def _is_better_pdf_text(*, candidate: str, baseline: str) -> bool:
+    candidate_chars, candidate_alpha_ratio = _pdf_text_quality(candidate)
+    baseline_chars, baseline_alpha_ratio = _pdf_text_quality(baseline)
+    if candidate_chars == 0:
+        return False
+    if baseline_chars == 0:
+        return True
+    if candidate_chars >= baseline_chars * 1.15:
+        return True
+    return candidate_alpha_ratio > baseline_alpha_ratio + 0.05
 
 
 def _normalize_transcript_object(raw: Any, *, format_hint: str) -> list[dict[str, Any]]:

@@ -590,6 +590,7 @@ Format behavior:
 - `analysis[].format`:
   - `auto`, `text`, `markdown`, `csv`, `tsv`, `json`, `html`, `docx`, `pdf`
   - tabular/structured formats are normalized to retrieval-friendly text before ingest
+  - `pdf` defaults to native text extraction; optional OCR fallback may run for low-quality text when enabled (`ANALYSIS_PDF_OCR_*`)
 
 Operational behavior:
 - If `manifest.json` is absent and auto-manifest is enabled, scanner generates one before validation.
@@ -598,6 +599,7 @@ Operational behavior:
 - Scanner validates required files and optional `sha256` checks before enqueueing.
 - Scanner writes one row in `ingest_jobs` and per-file metadata in `ingest_job_files`.
 - Worker updates status transitions: `queued` → `running` → `succeeded|failed`.
+- OCR behavior for scanned PDFs is deterministic and gated by config thresholds (`ANALYSIS_PDF_OCR_MIN_CHARS`, `ANALYSIS_PDF_OCR_MIN_ALPHA_RATIO`, `ANALYSIS_PDF_OCR_MAX_PAGES`), and is disabled by default.
 - Worker retry behavior:
   - retry transient failures with bounded exponential backoff (`INGEST_JOB_MAX_ATTEMPTS`, `INGEST_JOB_RETRY_BACKOFF_S`)
   - mark terminal failures only after max attempts are exhausted
