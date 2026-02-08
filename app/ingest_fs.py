@@ -12,12 +12,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 from redis import Redis
-from rq import Queue
+from rq import Queue, Retry
 from sqlalchemy import text
 
 from .config import settings
 from .db import engine
 from .ingest import ingest_analysis, ingest_call, ingest_transcript
+from .logging_utils import get_logger
 from .schemas import AnalysisArtifactIn, CallRef, ChunkingOptions, TranscriptPayload
 
 INGEST_JOB_STATUS = Literal["queued", "running", "succeeded", "failed", "invalid"]
@@ -28,6 +29,7 @@ STATUS_FAILED: INGEST_JOB_STATUS = "failed"
 STATUS_INVALID: INGEST_JOB_STATUS = "invalid"
 
 BUNDLE_ID_RE = re.compile(r"^[a-zA-Z0-9._-]{1,120}$")
+logger = get_logger(__name__)
 
 
 class TranscriptFileRef(BaseModel):
@@ -424,12 +426,31 @@ def list_ingest_jobs(
 
 def _enqueue_job(ingest_job_id: UUID) -> str:
     queue = Queue(settings.ingest_queue_name, connection=_redis())
+    max_attempts = max(1, int(settings.ingest_job_max_attempts))
+    retry = _build_retry_policy(max_attempts, settings.ingest_job_retry_backoff_s)
     rq_job = queue.enqueue(
         "app.ingest_fs.process_ingest_job",
         str(ingest_job_id),
         job_id=str(ingest_job_id),
+        retry=retry,
+    )
+    logger.info(
+        "ingest_job.enqueued ingest_job_id=%s queue=%s max_attempts=%s",
+        ingest_job_id,
+        settings.ingest_queue_name,
+        max_attempts,
     )
     return rq_job.id
+
+
+def _build_retry_policy(max_attempts: int, base_backoff_s: int) -> Optional[Retry]:
+    normalized_attempts = max(1, int(max_attempts))
+    max_retries = max(0, normalized_attempts - 1)
+    if max_retries == 0:
+        return None
+    base = max(1, int(base_backoff_s))
+    intervals = [base * (2 ** idx) for idx in range(max_retries)]
+    return Retry(max=max_retries, interval=intervals)
 
 
 def _record_invalid_bundle(bundle_path: Path, error: str) -> None:
@@ -463,6 +484,9 @@ def scan_inbox_once() -> Dict[str, Any]:
             validated = validate_bundle_directory(candidate)
         except Exception as exc:
             invalid += 1
+            logger.warning(
+                "ingest_bundle.invalid path=%s error=%s", candidate, str(exc)
+            )
             _record_invalid_bundle(candidate, str(exc))
             _move_bundle(candidate, paths["failed"])
             continue
@@ -480,6 +504,9 @@ def scan_inbox_once() -> Dict[str, Any]:
         )
         if not created:
             duplicates += 1
+            logger.warning(
+                "ingest_bundle.duplicate bundle_id=%s", validated.bundle_id
+            )
             update_ingest_job_status(
                 job_id,
                 STATUS_INVALID,
@@ -505,6 +532,12 @@ def scan_inbox_once() -> Dict[str, Any]:
         _upsert_job_files(job_id, rel_files)
         _enqueue_job(job_id)
         queued += 1
+        logger.info(
+            "ingest_bundle.queued bundle_id=%s ingest_job_id=%s files=%s",
+            validated.bundle_id,
+            job_id,
+            len(rel_files),
+        )
 
     return {
         "discovered": discovered,
@@ -534,6 +567,14 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
         error=None,
         started=True,
         increment_attempts=True,
+    )
+    attempt_no = int(job["attempts"]) + 1
+    max_attempts = max(1, int(settings.ingest_job_max_attempts))
+    logger.info(
+        "ingest_job.start ingest_job_id=%s attempt=%s max_attempts=%s",
+        job_uuid,
+        attempt_no,
+        max_attempts,
     )
 
     try:
@@ -571,6 +612,13 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
             error=None,
         )
         done_path = _move_bundle(validated.bundle_path, paths["done"])
+        logger.info(
+            "ingest_job.complete ingest_job_id=%s status=%s call_id=%s done_path=%s",
+            ingest_job_id,
+            STATUS_SUCCEEDED,
+            call_id,
+            done_path,
+        )
         return {
             "ingest_job_id": ingest_job_id,
             "status": STATUS_SUCCEEDED,
@@ -578,12 +626,33 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
             "done_path": str(done_path),
         }
     except Exception as exc:
-        update_ingest_job_status(
-            job_uuid,
-            STATUS_FAILED,
-            error=str(exc),
-            completed=True,
-        )
-        if source_path.exists():
-            _move_bundle(source_path, paths["failed"])
+        error = str(exc)
+        if attempt_no >= max_attempts:
+            update_ingest_job_status(
+                job_uuid,
+                STATUS_FAILED,
+                error=error,
+                completed=True,
+            )
+            if source_path.exists():
+                _move_bundle(source_path, paths["failed"])
+            logger.exception(
+                "ingest_job.failed ingest_job_id=%s attempt=%s error=%s",
+                ingest_job_id,
+                attempt_no,
+                error,
+            )
+        else:
+            update_ingest_job_status(
+                job_uuid,
+                STATUS_QUEUED,
+                error=error,
+                completed=False,
+            )
+            logger.warning(
+                "ingest_job.retry_scheduled ingest_job_id=%s attempt=%s error=%s",
+                ingest_job_id,
+                attempt_no,
+                error,
+            )
         raise

@@ -20,6 +20,7 @@
   - drop-folder contract (`ingest/inbox/<bundle_id>/manifest.json` + `_READY`)
   - scanner validates and enqueues to Redis
   - RQ worker processes jobs and tracks status in `ingest_jobs`/`ingest_job_files`
+  - bounded retry/backoff for transient failures before terminal `failed`
 - Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip, browse/expand, ids-only retrieval, and budget enforcement.
 - FastAPI startup migrated to lifespan (no deprecation warnings).
 
@@ -201,6 +202,7 @@
      - analysis ingest (if present)
    - Transitions status:
      - `queued` → `running` → `succeeded|failed`
+   - Retries transient failures with bounded exponential backoff.
    - Moves processed bundle to `done/` or `failed/`.
 
 5) **Job visibility API**

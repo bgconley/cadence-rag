@@ -103,6 +103,9 @@ def client(test_database_url: str, apply_migrations: None) -> TestClient:
     os.environ["INGEST_QUEUE_NAME"] = "ingest"
     os.environ["INGEST_ROOT_DIR"] = "/tmp/personal_rag_ingest_tests"
     os.environ["INGEST_POLL_SECONDS"] = "1"
+    os.environ["INGEST_JOB_MAX_ATTEMPTS"] = "3"
+    os.environ["INGEST_JOB_RETRY_BACKOFF_S"] = "1"
+    os.environ["LOG_LEVEL"] = "INFO"
 
     import app.config as config_module
     import app.db as db_module

@@ -352,7 +352,20 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
 );
 CREATE INDEX IF NOT EXISTS ingestion_runs_call_idx ON ingestion_runs (call_id);
 
--- 10) Ingest jobs (filesystem queue ingest)
+-- 10) Transcript ingest dedupe (idempotency)
+CREATE TABLE IF NOT EXISTS transcript_ingests (
+  transcript_ingest_id BIGSERIAL PRIMARY KEY,
+  call_id              UUID NOT NULL REFERENCES calls(call_id) ON DELETE CASCADE,
+  transcript_hash      TEXT NOT NULL,
+  utterance_count      INT NOT NULL DEFAULT 0,
+  chunk_count          INT NOT NULL DEFAULT 0,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (call_id, transcript_hash)
+);
+CREATE INDEX IF NOT EXISTS transcript_ingests_call_idx
+  ON transcript_ingests (call_id, created_at DESC);
+
+-- 11) Ingest jobs (filesystem queue ingest)
 CREATE TABLE IF NOT EXISTS ingest_jobs (
   ingest_job_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bundle_id         TEXT NOT NULL UNIQUE,      -- stable bundle identifier
@@ -523,6 +536,8 @@ Provenance storage (recommended in `metadata`):
 
 ### 8.3 Idempotency and reprocessing
 - Deduplicate ingest by `(source_uri, source_hash)` when possible
+- Deduplicate transcript ingest per call via `(call_id, transcript_hash)`:
+  - same normalized transcript + chunking options for the same call becomes a no-op
 - Pipeline versioning ensures re-chunk/re-embed jobs are traceable
 
 ### 8.4 Filesystem ingest queue contract
@@ -567,6 +582,9 @@ Operational behavior:
 - Scanner validates required files and optional `sha256` checks before enqueueing.
 - Scanner writes one row in `ingest_jobs` and per-file metadata in `ingest_job_files`.
 - Worker updates status transitions: `queued` → `running` → `succeeded|failed`.
+- Worker retry behavior:
+  - retry transient failures with bounded exponential backoff (`INGEST_JOB_MAX_ATTEMPTS`, `INGEST_JOB_RETRY_BACKOFF_S`)
+  - mark terminal failures only after max attempts are exhausted
 - Invalid bundles are marked `invalid` and moved to `failed/`.
 - Job status is observable via `GET /ingest/jobs` and `GET /ingest/jobs/{id}`.
 
@@ -740,6 +758,7 @@ Evidence ID formats (for citation gating):
 
 ## 13) Operational requirements
 - Local-first: default storage on local disk; no transcript text in logs
+- Structured logs include correlation IDs (`X-Request-ID`) and IDs/timings; avoid transcript/body content in logs
 - Pin versions:
   - Docker image tag (ParadeDB version + Postgres major)
   - Docker image digest (after first pull)

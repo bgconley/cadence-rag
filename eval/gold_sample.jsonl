@@ -1,2 +1,12 @@
 {"query_id":"q1","relevant_ids":["chunk:101","artifact:201"]}
 {"query_id":"q2","relevant_ids":["chunk:305"]}
+{"query_id":"q3","relevant_ids":["artifact_chunk:412","chunk:522"]}
+{"query_id":"q4","relevant_ids":["chunk:901"]}
+{"query_id":"q5","relevant_ids":["artifact_chunk:77","chunk:451"]}
+{"query_id":"q6","relevant_ids":["chunk:144","chunk:145"]}
+{"query_id":"q7","relevant_ids":["artifact_chunk:808"]}
+{"query_id":"q8","relevant_ids":["chunk:999","artifact_chunk:1001"]}
+{"query_id":"q9","relevant_ids":["chunk:231"]}
+{"query_id":"q10","relevant_ids":["artifact_chunk:64","chunk:72"]}
+{"query_id":"q11","relevant_ids":["chunk:333","artifact_chunk:334"]}
+{"query_id":"q12","relevant_ids":["artifact_chunk:515"]}

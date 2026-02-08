@@ -116,6 +116,16 @@ Check job status:
 curl -s http://localhost:8001/ingest/jobs | jq
 ```
 
+Queue retry/backoff is controlled via env:
+```bash
+INGEST_JOB_MAX_ATTEMPTS=3
+INGEST_JOB_RETRY_BACKOFF_S=10
+```
+
+Transcript ingest idempotency:
+- Re-ingesting the same normalized transcript payload (same call + same chunking options) is a no-op.
+- API returns `utterances_ingested=0` and `chunks_created=0` for duplicate payloads.
+
 ## Run modes (important)
 
 ### First run (new environment / fresh clone)
@@ -143,3 +153,5 @@ docker compose up -d db api
 ## Notes
 - `DATABASE_URL` and version expectations live in `.env` (see `.env.example`).
 - The app fails fast on version mismatches unless `SKIP_VERSION_CHECK=true`.
+- API responses include `X-Request-ID` for correlation with logs.
+- Evaluation commands are documented in `eval/README.md`, including regression gating.

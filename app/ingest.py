@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -12,11 +13,13 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
+from .logging_utils import get_logger
 from .schemas import AnalysisArtifactIn, CallRef, ChunkingOptions, UtteranceIn
 
 PIPELINE_VERSION = "v2"
 EMBEDDING_CONFIG_DISABLED = {"enabled": False, "model_id": None, "dim": 1024}
 NER_CONFIG_DISABLED = {"enabled": False}
+logger = get_logger(__name__)
 
 TECH_TOKEN_PATTERNS = [
     re.compile(r"https?://\S+", re.IGNORECASE),
@@ -112,6 +115,27 @@ def _now_utc() -> datetime:
 
 def count_tokens(text: str) -> int:
     return len(TOKEN_RE.findall(text))
+
+
+def _compute_transcript_hash(
+    utterances_in: Sequence[UtteranceIn], options: ChunkingOptions
+) -> str:
+    normalized = [
+        {
+            "speaker": (u.speaker or "").strip(),
+            "speaker_id": (u.speaker_id or "").strip(),
+            "start_ts_ms": int(u.start_ts_ms),
+            "end_ts_ms": int(u.end_ts_ms),
+            "text": u.text.strip(),
+        }
+        for u in utterances_in
+    ]
+    payload = {
+        "chunking_options": options.model_dump(mode="json"),
+        "utterances": normalized,
+    }
+    canonical = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def extract_tech_tokens(text: str) -> List[str]:
@@ -523,9 +547,32 @@ def ingest_transcript(
     options: ChunkingOptions,
 ) -> Tuple[UUID, int, int]:
     call_id, call_started_at, _created = resolve_call(call_ref)
+    transcript_hash = _compute_transcript_hash(utterances_in, options)
 
     utterance_records: List[UtteranceRecord] = []
     with engine.begin() as conn:
+        dedupe_row = conn.execute(
+            text(
+                """
+                INSERT INTO transcript_ingests
+                  (call_id, transcript_hash)
+                VALUES
+                  (:call_id, :transcript_hash)
+                ON CONFLICT (call_id, transcript_hash) DO NOTHING
+                RETURNING transcript_ingest_id
+                """
+            ),
+            {"call_id": call_id, "transcript_hash": transcript_hash},
+        ).fetchone()
+        if not dedupe_row:
+            logger.info(
+                "ingest_transcript.duplicate call_id=%s transcript_hash=%s",
+                call_id,
+                transcript_hash,
+            )
+            return call_id, 0, 0
+        transcript_ingest_id = dedupe_row[0]
+
         for u in utterances_in:
             text_val = u.text.strip()
             token_count = count_tokens(text_val)
@@ -611,7 +658,28 @@ def ingest_transcript(
             embedding_config=EMBEDDING_CONFIG_DISABLED,
             ner_config=NER_CONFIG_DISABLED,
         )
+        conn.execute(
+            text(
+                """
+                UPDATE transcript_ingests
+                SET utterance_count = :utterance_count,
+                    chunk_count = :chunk_count
+                WHERE transcript_ingest_id = :transcript_ingest_id
+                """
+            ),
+            {
+                "transcript_ingest_id": transcript_ingest_id,
+                "utterance_count": len(utterance_records),
+                "chunk_count": len(chunks),
+            },
+        )
 
+    logger.info(
+        "ingest_transcript.complete call_id=%s utterances=%s chunks=%s",
+        call_id,
+        len(utterance_records),
+        len(chunks),
+    )
     return call_id, len(utterance_records), len(chunks)
 
 
@@ -683,4 +751,5 @@ def ingest_analysis(
             embedding_config=EMBEDDING_CONFIG_DISABLED,
             ner_config=NER_CONFIG_DISABLED,
         )
+    logger.info("ingest_analysis.complete call_id=%s artifacts=%s", call_id, len(artifacts))
     return call_id, len(artifacts)

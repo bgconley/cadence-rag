@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class CallRef(BaseModel):
@@ -34,9 +34,17 @@ class TranscriptPayload(BaseModel):
 
 
 class ChunkingOptions(BaseModel):
-    target_tokens: int = 350
-    max_tokens: int = 600
-    overlap_tokens: int = 50
+    target_tokens: int = Field(default=350, ge=1)
+    max_tokens: int = Field(default=600, ge=1)
+    overlap_tokens: int = Field(default=50, ge=0)
+
+    @model_validator(mode="after")
+    def validate_relationships(self) -> "ChunkingOptions":
+        if self.max_tokens < self.target_tokens:
+            raise ValueError("max_tokens must be >= target_tokens")
+        if self.overlap_tokens >= self.target_tokens:
+            raise ValueError("overlap_tokens must be < target_tokens")
+        return self
 
 
 class TranscriptIngestRequest(BaseModel):
@@ -46,7 +54,7 @@ class TranscriptIngestRequest(BaseModel):
 
 
 class AnalysisArtifactIn(BaseModel):
-    kind: str
+    kind: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
     content: str
     metadata: Optional[Dict[str, Any]] = None
 
@@ -87,5 +95,5 @@ class RetrieveRequest(BaseModel):
 
 class ExpandRequest(BaseModel):
     evidence_id: str
-    window_ms: Optional[int] = None
-    max_chars: int = 2000
+    window_ms: Optional[int] = Field(default=None, ge=0)
+    max_chars: int = Field(default=2000, ge=1, le=20000)

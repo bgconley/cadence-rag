@@ -5,9 +5,12 @@ import time
 
 from app.config import settings
 from app.ingest_fs import scan_inbox_once
+from app.logging_utils import configure_logging, get_logger
 
 
 def main() -> None:
+    configure_logging(settings.log_level)
+    logger = get_logger(__name__)
     parser = argparse.ArgumentParser(
         description="Scan ingest inbox for ready bundles and enqueue them."
     )
@@ -29,12 +32,12 @@ def main() -> None:
 
     while True:
         summary = scan_inbox_once()
-        print(
-            "[ingest_scanner] "
-            f"discovered={summary['discovered']} "
-            f"queued={summary['queued']} "
-            f"duplicates={summary['duplicates']} "
-            f"invalid={summary['invalid']}"
+        logger.info(
+            "ingest_scanner.pass discovered=%s queued=%s duplicates=%s invalid=%s",
+            summary["discovered"],
+            summary["queued"],
+            summary["duplicates"],
+            summary["invalid"],
         )
         if args.once:
             return

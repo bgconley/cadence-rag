@@ -29,6 +29,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       INGEST_QUEUE_NAME: ingest
       INGEST_ROOT_DIR: /ingest
+      INGEST_JOB_MAX_ATTEMPTS: "3"
+      INGEST_JOB_RETRY_BACKOFF_S: "10"
+      LOG_LEVEL: INFO
     ports:
       - "${API_PORT:-8001}:8000"
     volumes:
@@ -47,6 +50,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       INGEST_QUEUE_NAME: ingest
       INGEST_ROOT_DIR: /ingest
+      INGEST_JOB_MAX_ATTEMPTS: "3"
+      INGEST_JOB_RETRY_BACKOFF_S: "10"
+      LOG_LEVEL: INFO
     volumes:
       - ./ingest:/ingest
     depends_on:
@@ -64,6 +70,9 @@ services:
       INGEST_QUEUE_NAME: ingest
       INGEST_ROOT_DIR: /ingest
       INGEST_POLL_SECONDS: "5"
+      INGEST_JOB_MAX_ATTEMPTS: "3"
+      INGEST_JOB_RETRY_BACKOFF_S: "10"
+      LOG_LEVEL: INFO
     volumes:
       - ./ingest:/ingest
     depends_on:

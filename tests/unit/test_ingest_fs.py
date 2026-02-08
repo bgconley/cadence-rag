@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.ingest_fs import validate_bundle_directory
+from app.ingest_fs import _build_retry_policy, validate_bundle_directory
 
 
 def _write(path: Path, content: str) -> None:
@@ -73,3 +73,12 @@ def test_validate_bundle_directory_rejects_path_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="path escapes bundle root"):
         validate_bundle_directory(bundle)
+
+
+def test_build_retry_policy_backoff_intervals() -> None:
+    assert _build_retry_policy(max_attempts=1, base_backoff_s=10) is None
+
+    retry = _build_retry_policy(max_attempts=4, base_backoff_s=5)
+    assert retry is not None
+    assert retry.max == 3
+    assert list(retry.intervals) == [5, 10, 20]

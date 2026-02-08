@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     ingest_queue_name: str = "ingest"
     ingest_root_dir: str = "./ingest"
     ingest_poll_seconds: int = 5
+    ingest_job_max_attempts: int = 3
+    ingest_job_retry_backoff_s: int = 10
+    log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
         env_file=".env",

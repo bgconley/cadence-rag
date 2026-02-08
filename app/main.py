@@ -1,15 +1,21 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from .browse import expand_evidence, get_call, get_chunk, list_calls
 from .config import settings
 from .db import fetch_db_info, validate_versions
 from .ingest_fs import get_ingest_job, list_ingest_jobs
 from .ingest import ingest_analysis, ingest_call, ingest_transcript
+from .logging_utils import (
+    configure_logging,
+    get_logger,
+    reset_request_id,
+    set_request_id,
+)
 from .retrieve import retrieve_evidence
 from .schemas import (
     AnalysisIngestRequest,
@@ -20,16 +26,38 @@ from .schemas import (
     TranscriptIngestRequest,
 )
 
+configure_logging(settings.log_level)
+logger = get_logger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not settings.skip_version_check:
         ok, message = validate_versions()
         if not ok:
             raise RuntimeError(message)
+    logger.info("api.startup complete")
     yield
 
 
 app = FastAPI(title="Personal RAG API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid4().hex
+    token = set_request_id(request_id)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "request.failed method=%s path=%s", request.method, request.url.path
+        )
+        raise
+    finally:
+        reset_request_id(token)
+    response.headers["x-request-id"] = request_id
+    return response
 
 
 @app.get("/health")

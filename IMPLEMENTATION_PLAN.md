@@ -75,11 +75,13 @@
 - Idempotent ingest:
   - `(source_uri, source_hash)` detection
   - safe re-run behavior
+  - transcript-level dedupe per call via transcript hash reservation (`transcript_ingests`)
 - Artifact ingest endpoint (summary/decisions/action items), supporting **analysis-only ingest**
 - Filesystem ingest conveyor:
   - drop bundles into `INGEST_ROOT_DIR/inbox/<bundle_id>/` with `manifest.json` + `_READY`
   - scanner validates bundles and enqueues jobs to Redis
   - RQ worker processes jobs and updates `ingest_jobs` / `ingest_job_files`
+  - bounded retry/backoff for transient failures before terminal failure state
   - status APIs expose queued/running/succeeded/failed/invalid states
 
 ### Acceptance criteria

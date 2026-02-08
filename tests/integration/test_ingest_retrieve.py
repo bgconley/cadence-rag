@@ -342,3 +342,52 @@ def test_retrieve_without_embedding_service_stays_functional(
     assert body["quotes"], "expected lexical retrieval even without dense lane"
     assert body["notes"]["retrieval"]["planner"] == "lexical_only"
     assert body["notes"]["retrieval"]["lanes"]["dense"] is False
+
+
+def test_ingest_transcript_is_idempotent_per_call_and_payload(
+    client: TestClient,
+) -> None:
+    external_id = f"call-{uuid4().hex[:8]}"
+    payload = {
+        "call_ref": {
+            "external_source": "test",
+            "external_id": external_id,
+            "started_at": "2026-02-03T00:00:00Z",
+            "title": "Transcript Dedupe Call",
+        },
+        "transcript": {
+            "format": "json_turns",
+            "content": [
+                {
+                    "speaker": "Alice",
+                    "start_ts_ms": 0,
+                    "end_ts_ms": 1000,
+                    "text": "Discussed BOM and object store tiering options.",
+                },
+                {
+                    "speaker": "Bob",
+                    "start_ts_ms": 1000,
+                    "end_ts_ms": 2000,
+                    "text": "Compare Lenovo and Dell build plans.",
+                },
+            ],
+        },
+    }
+
+    first = client.post("/ingest/transcript", json=payload)
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["utterances_ingested"] == 2
+    assert first_body["chunks_created"] >= 1
+
+    second = client.post("/ingest/transcript", json=payload)
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["call_id"] == first_body["call_id"]
+    assert second_body["utterances_ingested"] == 0
+    assert second_body["chunks_created"] == 0
+
+    call_resp = client.get(f"/calls/{first_body['call_id']}")
+    assert call_resp.status_code == 200
+    counts = call_resp.json()["counts"]
+    assert counts["utterances"] == 2

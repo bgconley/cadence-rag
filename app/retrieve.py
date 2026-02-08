@@ -9,6 +9,7 @@ from .config import settings
 from .db import engine
 from .embeddings import EmbeddingClientError, embed_texts, embeddings_enabled
 from .ingest import extract_tech_tokens
+from .logging_utils import get_logger
 from .schemas import Budget, RetrieveFilters, RetrieveRequest
 
 DEFAULT_RRF_K = 60
@@ -20,6 +21,7 @@ DEFAULT_TECH_TOPK = 50
 DEFAULT_MAX_ARTIFACTS = 2
 DEFAULT_MAX_QUOTES_PER_CALL = 2
 DEFAULT_SNIPPET_CHARS = 800
+logger = get_logger(__name__)
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -391,8 +393,16 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
     query = payload.query.strip()
     budget = payload.budget or Budget()
     return_style = payload.return_style
+    logger.info(
+        "retrieve.start query_id=%s intent=%s return_style=%s debug=%s",
+        query_id,
+        payload.intent,
+        return_style,
+        payload.debug,
+    )
 
     if not query:
+        logger.info("retrieve.empty_query query_id=%s", query_id)
         if return_style == "ids_only":
             return {"query_id": query_id, "retrieved_ids": []}
         return {
@@ -553,6 +563,12 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
         }
         if debug_payload is not None:
             response["debug"] = debug_payload
+        logger.info(
+            "retrieve.complete query_id=%s mode=ids_only ids=%s dense=%s",
+            query_id,
+            len(retrieved_ids),
+            dense_enabled,
+        )
         return response
 
     max_items = budget.max_evidence_items
@@ -661,4 +677,11 @@ def retrieve_evidence(payload: RetrieveRequest) -> Dict[str, Any]:
     }
     if debug_payload is not None:
         response["debug"] = debug_payload
+    logger.info(
+        "retrieve.complete query_id=%s artifacts=%s quotes=%s dense=%s",
+        query_id,
+        len(artifacts_out),
+        len(quotes_out),
+        dense_enabled,
+    )
     return response
