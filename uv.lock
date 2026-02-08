@@ -317,7 +317,7 @@ wheels = [
 ]
 
 [[package]]
-name = "personal-rag"
+name = "cadence-rag"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [

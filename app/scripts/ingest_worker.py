@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from redis import Redis
-from rq import Connection, Worker
+from rq import Worker
 
 from app.config import settings
 from app.logging_utils import configure_logging, get_logger
@@ -16,9 +16,8 @@ def main() -> None:
         settings.ingest_queue_name,
         settings.redis_url,
     )
-    with Connection(connection):
-        worker = Worker([settings.ingest_queue_name])
-        worker.work()
+    worker = Worker([settings.ingest_queue_name], connection=connection)
+    worker.work()
 
 
 if __name__ == "__main__":

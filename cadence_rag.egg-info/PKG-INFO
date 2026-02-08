@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
-Name: personal-rag
+Name: cadence-rag
 Version: 0.0.0
-Summary: Local-first, transcript-centric Personal RAG
+Summary: Local-first, transcript-centric Cadence RAG
 Requires-Python: >=3.12
 Requires-Dist: fastapi>=0.110
 Requires-Dist: uvicorn[standard]>=0.29

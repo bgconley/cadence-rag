@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "personal-rag"
+name = "cadence-rag"
 version = "0.0.0"
-description = "Local-first, transcript-centric Personal RAG"
+description = "Local-first, transcript-centric Cadence RAG"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.110",

@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Personal RAG API", lifespan=lifespan)
+app = FastAPI(title="Cadence RAG API", lifespan=lifespan)
 
 
 @app.middleware("http")

@@ -1,9 +1,9 @@
-# Personal RAG (Transcript-Centric) — App Spec
+# Cadence RAG (Transcript-Centric) — App Spec
 **Status:** Canonical  
 **Last updated:** 2026-02-03  
 
 ## 1) Summary
-Build a **local-first, transcript-centric Personal RAG** optimized for **technical call transcripts**. The system is designed for **high recall on exact technical strings** (error codes, ticket IDs, stack traces) while still answering semantic questions accurately.
+Build a **local-first, transcript-centric Cadence RAG** optimized for **technical call transcripts**. The system is designed for **high recall on exact technical strings** (error codes, ticket IDs, stack traces) while still answering semantic questions accurately.
 
 Core strategy:
 - **Deterministic, server-orchestrated retrieval** (no LLM tool-choice loops)

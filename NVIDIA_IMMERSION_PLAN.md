@@ -1,4 +1,4 @@
-# NVIDIA Immersion Track (Personal RAG)
+# NVIDIA Immersion Track (Cadence RAG)
 
 This is a human-run, step-by-step plan to learn NVIDIA's inference + tooling ecosystem
 by deploying GPU endpoints that this repo will call (embeddings, rerank, LLM), then

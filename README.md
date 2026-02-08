@@ -1,6 +1,41 @@
-# Personal RAG — Foundation
+# Cadence RAG — Foundation
 
 ## Quickstart (Phase 0)
+
+### Stack naming (`cadence-rag`)
+`docker-compose.yml` now sets compose project name to `cadence-rag` and fixed container names:
+- `cadence_rag_db`
+- `cadence_rag_redis`
+- `cadence_rag_api`
+- `cadence_rag_ingest_worker`
+- `cadence_rag_ingest_scanner`
+
+If you are migrating from older `personal_rag_*` containers on a host, run this once:
+```bash
+# 1) Stop old containers if present
+docker rm -f \
+  personal_rag_ingest_scanner \
+  personal_rag_ingest_worker \
+  personal_rag_api \
+  personal_rag_redis \
+  personal_rag_db 2>/dev/null || true
+
+# 2) Migrate DB volume data old -> new
+docker volume rm cadence_rag_db_data 2>/dev/null || true
+docker volume create cadence_rag_db_data
+docker run --rm \
+  -v personal-rag_db_data:/from \
+  -v cadence_rag_db_data:/to \
+  alpine sh -lc 'cd /from && cp -a . /to/'
+
+# 3) Start renamed stack
+docker compose up -d db redis api ingest_scanner ingest_worker
+```
+
+Verify:
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}' | grep cadence_rag_
+```
 
 ### 1) Start core infrastructure
 ```bash

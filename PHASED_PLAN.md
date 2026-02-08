@@ -1,4 +1,4 @@
-# Personal RAG — Phased Implementation Plan (Forward Roadmap)
+# Cadence RAG — Phased Implementation Plan (Forward Roadmap)
 **Status:** Canonical  \
 **Last updated:** 2026-02-07
 

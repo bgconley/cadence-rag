@@ -1,4 +1,4 @@
-# Personal RAG (Transcript-Centric) — Implementation Plan
+# Cadence RAG (Transcript-Centric) — Implementation Plan
 **Status:** Canonical  
 **Last updated:** 2026-02-04  
 

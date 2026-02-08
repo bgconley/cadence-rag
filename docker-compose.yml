@@ -1,7 +1,9 @@
+name: cadence-rag
+
 services:
   db:
     image: paradedb/paradedb:0.21.5-pg18
-    container_name: personal_rag_db
+    container_name: cadence_rag_db
     environment:
       POSTGRES_USER: rag
       POSTGRES_PASSWORD: rag
@@ -13,13 +15,13 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: personal_rag_redis
+    container_name: cadence_rag_redis
     ports:
       - "6379:6379"
 
   api:
     build: .
-    container_name: personal_rag_api
+    container_name: cadence_rag_api
     environment:
       DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag
       EXPECTED_PG_VERSION: "18.1"
@@ -42,7 +44,7 @@ services:
 
   ingest_worker:
     build: .
-    container_name: personal_rag_ingest_worker
+    container_name: cadence_rag_ingest_worker
     command: ["python", "-m", "app.scripts.ingest_worker"]
     environment:
       DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag
@@ -61,7 +63,7 @@ services:
 
   ingest_scanner:
     build: .
-    container_name: personal_rag_ingest_scanner
+    container_name: cadence_rag_ingest_scanner
     command: ["python", "-m", "app.scripts.ingest_scanner"]
     environment:
       DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag
@@ -81,3 +83,4 @@ services:
 
 volumes:
   db_data:
+    name: cadence_rag_db_data
