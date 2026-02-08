@@ -94,3 +94,82 @@ def test_scan_inbox_once_enqueues_and_tracks_job(
     jobs_resp = client.get("/ingest/jobs", params={"status": "queued"})
     assert jobs_resp.status_code == 200
     assert any(item["bundle_id"] == "scan-call-001" for item in jobs_resp.json()["items"])
+
+
+def test_scan_inbox_once_auto_manifest_without_manifest_file(
+    client: TestClient, tmp_path: Path, monkeypatch
+) -> None:
+    import app.ingest_fs as ingest_fs
+
+    root = tmp_path / "ingest"
+    bundle = root / "inbox" / "scan-auto-001"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "_READY").write_text("", encoding="utf-8")
+    (bundle / "starcluster.md").write_text(
+        "\n".join(
+            [
+                "**Paul Tran (SMC)**: Intro",
+                "*00:00*",
+                "**Noel A**: Objectives",
+                "*00:44*",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "analysis").mkdir(parents=True, exist_ok=True)
+    (bundle / "analysis" / "action_items.csv").write_text(
+        "owner,item\nAlice,Send draft architecture\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(ingest_fs.settings, "ingest_root_dir", str(root))
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_manifest", True)
+    monkeypatch.setattr(ingest_fs, "_enqueue_job", lambda ingest_job_id: str(ingest_job_id))
+
+    summary = ingest_fs.scan_inbox_once()
+    assert summary["discovered"] == 1
+    assert summary["queued"] == 1
+    assert summary["invalid"] == 0
+
+    generated_manifest = root / "processing" / "scan-auto-001" / "manifest.json"
+    assert generated_manifest.exists()
+    payload = json.loads(generated_manifest.read_text(encoding="utf-8"))
+    assert payload["transcript"]["format"] == "markdown_turns"
+    assert payload["analysis"][0]["format"] == "csv"
+
+
+def test_scan_inbox_once_single_file_auto_wrap(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    import app.ingest_fs as ingest_fs
+
+    root = tmp_path / "ingest"
+    inbox = root / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "Starcluster call 20251125 maor.md").write_text(
+        "\n".join(
+            [
+                "**Paul Tran (SMC)**: Intro",
+                "*00:00*",
+                "**Noel A**: Objectives",
+                "*00:44*",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(ingest_fs.settings, "ingest_root_dir", str(root))
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_manifest", True)
+    monkeypatch.setattr(ingest_fs.settings, "ingest_single_file_min_age_s", 0)
+    monkeypatch.setattr(ingest_fs, "_enqueue_job", lambda ingest_job_id: str(ingest_job_id))
+
+    summary = ingest_fs.scan_inbox_once()
+    assert summary["discovered"] == 1
+    assert summary["queued"] == 1
+    assert summary["invalid"] == 0
+
+    processing_dirs = [path for path in (root / "processing").iterdir() if path.is_dir()]
+    assert len(processing_dirs) == 1
+    generated_manifest = processing_dirs[0] / "manifest.json"
+    assert generated_manifest.exists()
+    payload = json.loads(generated_manifest.read_text(encoding="utf-8"))
+    assert payload["transcript"]["path"] == "Starcluster call 20251125 maor.md"
+    assert payload["transcript"]["format"] == "markdown_turns"

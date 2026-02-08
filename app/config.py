@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     ingest_queue_name: str = "ingest"
     ingest_root_dir: str = "./ingest"
     ingest_poll_seconds: int = 5
+    ingest_auto_manifest: bool = True
+    ingest_single_file_min_age_s: int = 5
     ingest_job_max_attempts: int = 3
     ingest_job_retry_backoff_s: int = 10
     log_level: str = "INFO"

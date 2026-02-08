@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
+from .ingest_adapters import load_analysis_content, load_transcript_payload
 from .ingest import ingest_analysis, ingest_call, ingest_transcript
 from .logging_utils import get_logger
 from .schemas import AnalysisArtifactIn, CallRef, ChunkingOptions, TranscriptPayload
@@ -29,12 +30,30 @@ STATUS_FAILED: INGEST_JOB_STATUS = "failed"
 STATUS_INVALID: INGEST_JOB_STATUS = "invalid"
 
 BUNDLE_ID_RE = re.compile(r"^[a-zA-Z0-9._-]{1,120}$")
+MANIFEST_FILENAME = "manifest.json"
+READY_FILENAME = "_READY"
+TRANSCRIPT_EXTS = {".json", ".md", ".markdown", ".txt"}
+ANALYSIS_EXTS = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".log",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".html",
+    ".htm",
+    ".docx",
+    ".pdf",
+}
+DIRECT_INBOX_FILE_EXTS = TRANSCRIPT_EXTS | ANALYSIS_EXTS
+INCOMPLETE_FILE_SUFFIXES = (".part", ".partial", ".tmp", ".download")
 logger = get_logger(__name__)
 
 
 class TranscriptFileRef(BaseModel):
     path: str = "transcript.json"
-    format: Literal["json_turns"] = "json_turns"
+    format: Literal["json_turns", "markdown_turns", "auto"] = "json_turns"
     sha256: Optional[str] = None
     options: Optional[ChunkingOptions] = None
 
@@ -42,6 +61,9 @@ class TranscriptFileRef(BaseModel):
 class AnalysisFileRef(BaseModel):
     kind: str
     path: str
+    format: Literal[
+        "auto", "text", "markdown", "csv", "tsv", "json", "html", "docx", "pdf"
+    ] = "auto"
     sha256: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -154,9 +176,9 @@ def _validate_file_ref(
 
 def validate_bundle_directory(bundle_path: Path) -> ValidatedBundle:
     bundle_path = bundle_path.resolve()
-    manifest_path = bundle_path / "manifest.json"
+    manifest_path = bundle_path / MANIFEST_FILENAME
     if not manifest_path.exists():
-        raise ValueError("manifest.json is required")
+        raise ValueError(f"{MANIFEST_FILENAME} is required")
     manifest = _load_manifest(manifest_path)
     bundle_id = _normalize_bundle_id(bundle_path, manifest)
     if manifest.transcript is None and not manifest.analysis:
@@ -167,7 +189,7 @@ def validate_bundle_directory(bundle_path: Path) -> ValidatedBundle:
         _validate_file_ref(
             bundle_path=bundle_path,
             kind="manifest",
-            relative_path="manifest.json",
+            relative_path=MANIFEST_FILENAME,
             expected_sha256=None,
         )
     )
@@ -196,6 +218,204 @@ def validate_bundle_directory(bundle_path: Path) -> ValidatedBundle:
         manifest=manifest,
         files=files,
     )
+
+
+def _infer_transcript_format(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".markdown", ".txt"}:
+        return "markdown_turns"
+    return "auto"
+
+
+def _infer_analysis_format(path: Path) -> str:
+    suffix = path.suffix.lower()
+    mapping = {
+        ".md": "markdown",
+        ".markdown": "markdown",
+        ".txt": "text",
+        ".log": "text",
+        ".csv": "csv",
+        ".tsv": "tsv",
+        ".json": "json",
+        ".html": "html",
+        ".htm": "html",
+        ".docx": "docx",
+        ".pdf": "pdf",
+    }
+    return mapping.get(suffix, "auto")
+
+
+def _infer_analysis_kind(path: Path) -> str:
+    stem = path.stem.lower()
+    if "action" in stem or "todo" in stem or "next_step" in stem:
+        return "action_items"
+    if "decision" in stem:
+        return "decisions"
+    if "note" in stem or "tech" in stem:
+        return "tech_notes"
+    return "summary"
+
+
+def _list_bundle_files(bundle_path: Path) -> List[Path]:
+    files = [
+        path
+        for path in bundle_path.rglob("*")
+        if path.is_file() and not path.name.startswith(".")
+    ]
+    files.sort(key=lambda p: str(p.relative_to(bundle_path)).lower())
+    return files
+
+
+def _supports_direct_inbox_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.name in {MANIFEST_FILENAME, READY_FILENAME}:
+        return False
+    lower_name = path.name.lower()
+    if lower_name.endswith(INCOMPLETE_FILE_SUFFIXES):
+        return False
+    return path.suffix.lower() in DIRECT_INBOX_FILE_EXTS
+
+
+def _is_direct_inbox_file_ready(path: Path) -> bool:
+    if not _supports_direct_inbox_file(path):
+        return False
+    age_s = time.time() - path.stat().st_mtime
+    return age_s >= max(0, int(settings.ingest_single_file_min_age_s))
+
+
+def _sanitize_bundle_seed(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("._-")
+    if not cleaned:
+        cleaned = "bundle"
+    return cleaned[:100]
+
+
+def _build_bundle_id_from_file(path: Path) -> str:
+    seed = _sanitize_bundle_seed(path.stem)
+    digest = _sha256_file(path)[:12]
+    bundle_id = f"{seed}-{digest}"
+    if not BUNDLE_ID_RE.fullmatch(bundle_id):
+        bundle_id = _sanitize_bundle_seed(bundle_id)
+    return bundle_id
+
+
+def _move_file(src: Path, dest_root: Path) -> Path:
+    dest_root.mkdir(parents=True, exist_ok=True)
+    target = dest_root / src.name
+    if target.exists():
+        target = dest_root / f"{src.stem}-{int(time.time())}{src.suffix}"
+    shutil.move(str(src), str(target))
+    return target.resolve()
+
+
+def _wrap_single_file_candidate(path: Path, processing_root: Path) -> Path:
+    bundle_id = _build_bundle_id_from_file(path)
+    bundle_path = processing_root / bundle_id
+    if bundle_path.exists():
+        bundle_path = processing_root / f"{bundle_id}-{int(time.time())}"
+    bundle_path.mkdir(parents=True, exist_ok=False)
+    _move_file(path, bundle_path)
+    return bundle_path.resolve()
+
+
+def _pick_transcript_candidate(bundle_path: Path, files: Sequence[Path]) -> Optional[Path]:
+    candidates = [
+        path
+        for path in files
+        if path.name not in {MANIFEST_FILENAME, READY_FILENAME}
+        and path.suffix.lower() in TRANSCRIPT_EXTS
+    ]
+    if not candidates:
+        return None
+
+    def rank(path: Path) -> tuple[int, str]:
+        rel = str(path.relative_to(bundle_path)).lower()
+        score = 100
+        if "transcript" in rel:
+            score -= 80
+        if "call" in rel:
+            score -= 10
+        if path.suffix.lower() == ".json":
+            score -= 10
+        return score, rel
+
+    return min(candidates, key=rank)
+
+
+def _title_from_bundle_id(bundle_id: str) -> str:
+    words = re.sub(r"[_\-]+", " ", bundle_id).strip().split()
+    if not words:
+        return bundle_id
+    return " ".join(word.capitalize() for word in words)
+
+
+def _build_auto_manifest(bundle_path: Path) -> BundleManifest:
+    files = _list_bundle_files(bundle_path)
+    transcript_path = _pick_transcript_candidate(bundle_path, files)
+
+    analysis_refs: List[AnalysisFileRef] = []
+    for path in files:
+        if path.name in {MANIFEST_FILENAME, READY_FILENAME}:
+            continue
+        if transcript_path is not None and path == transcript_path:
+            continue
+        if path.suffix.lower() not in ANALYSIS_EXTS:
+            continue
+
+        rel = str(path.relative_to(bundle_path))
+        analysis_refs.append(
+            AnalysisFileRef(
+                kind=_infer_analysis_kind(path),
+                path=rel,
+                format=_infer_analysis_format(path),
+            )
+        )
+
+    if transcript_path is None and not analysis_refs:
+        raise ValueError("manifest missing and no transcript/analysis files detected")
+
+    bundle_id = bundle_path.name
+    if not BUNDLE_ID_RE.fullmatch(bundle_id):
+        bundle_id = _sanitize_bundle_seed(bundle_id)
+    transcript_ref = None
+    if transcript_path is not None:
+        transcript_ref = TranscriptFileRef(
+            path=str(transcript_path.relative_to(bundle_path)),
+            format=_infer_transcript_format(transcript_path),
+        )
+
+    manifest = BundleManifest(
+        bundle_id=bundle_id,
+        call_ref=CallRef(
+            external_source="filesystem",
+            external_id=bundle_id,
+            title=_title_from_bundle_id(bundle_id),
+        ),
+        transcript=transcript_ref,
+        analysis=analysis_refs,
+    )
+    return manifest
+
+
+def _ensure_manifest(bundle_path: Path) -> Path:
+    manifest_path = bundle_path / MANIFEST_FILENAME
+    if manifest_path.exists():
+        return manifest_path
+    if not settings.ingest_auto_manifest:
+        raise ValueError(f"{MANIFEST_FILENAME} is required")
+
+    manifest = _build_auto_manifest(bundle_path)
+    manifest_path.write_text(
+        json.dumps(manifest.model_dump(mode="json", exclude_none=True), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    logger.info(
+        "ingest_bundle.manifest_generated bundle_id=%s manifest_path=%s",
+        manifest.bundle_id or bundle_path.name,
+        manifest_path,
+    )
+    return manifest_path
 
 
 def _move_bundle(src: Path, dest_root: Path) -> Path:
@@ -455,10 +675,27 @@ def _build_retry_policy(max_attempts: int, base_backoff_s: int) -> Optional[Retr
 
 def _record_invalid_bundle(bundle_path: Path, error: str) -> None:
     bundle_id = bundle_path.name
-    manifest_path = bundle_path / "manifest.json"
+    manifest_path = bundle_path / MANIFEST_FILENAME
     _create_or_get_job(
         bundle_id=bundle_id,
         source_path=bundle_path,
+        manifest_path=manifest_path,
+        call_ref={},
+        status=STATUS_INVALID,
+        error=error,
+    )
+
+
+def _record_invalid_path(path: Path, error: str) -> None:
+    if path.is_dir():
+        _record_invalid_bundle(path, error)
+        return
+
+    bundle_id = _sanitize_bundle_seed(path.stem)
+    manifest_path = path.parent / f"{path.name}.manifest.json"
+    _create_or_get_job(
+        bundle_id=bundle_id,
+        source_path=path,
         manifest_path=manifest_path,
         call_ref={},
         status=STATUS_INVALID,
@@ -474,25 +711,41 @@ def scan_inbox_once() -> Dict[str, Any]:
     invalid = 0
 
     for candidate in sorted(paths["inbox"].iterdir()):
-        if not candidate.is_dir():
-            continue
-        if not (candidate / "_READY").exists():
+        candidate_is_bundle_dir = candidate.is_dir() and (candidate / READY_FILENAME).exists()
+        candidate_is_single_file = candidate.is_file() and _is_direct_inbox_file_ready(candidate)
+        if not candidate_is_bundle_dir and not candidate_is_single_file:
             continue
         discovered += 1
 
+        processing_path: Optional[Path] = None
         try:
-            validated = validate_bundle_directory(candidate)
+            if candidate_is_bundle_dir:
+                _ensure_manifest(candidate)
+                validated = validate_bundle_directory(candidate)
+                processing_path = _move_bundle(candidate, paths["processing"])
+            else:
+                processing_path = _wrap_single_file_candidate(
+                    candidate, paths["processing"]
+                )
+                _ensure_manifest(processing_path)
+                validated = validate_bundle_directory(processing_path)
         except Exception as exc:
             invalid += 1
             logger.warning(
                 "ingest_bundle.invalid path=%s error=%s", candidate, str(exc)
             )
-            _record_invalid_bundle(candidate, str(exc))
-            _move_bundle(candidate, paths["failed"])
+            if processing_path and processing_path.exists():
+                _record_invalid_path(processing_path, str(exc))
+                _move_bundle(processing_path, paths["failed"])
+            elif candidate.exists():
+                _record_invalid_path(candidate, str(exc))
+                if candidate.is_dir():
+                    _move_bundle(candidate, paths["failed"])
+                elif candidate.is_file():
+                    _move_file(candidate, paths["failed"])
             continue
 
-        processing_path = _move_bundle(candidate, paths["processing"])
-        processing_manifest_path = processing_path / "manifest.json"
+        processing_manifest_path = processing_path / MANIFEST_FILENAME
         job_id, created = _create_or_get_job(
             bundle_id=validated.bundle_id,
             source_path=processing_path,
@@ -547,11 +800,8 @@ def scan_inbox_once() -> Dict[str, Any]:
     }
 
 
-def _load_transcript_file(path: Path) -> TranscriptPayload:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(raw, list):
-        raw = {"format": "json_turns", "content": raw}
-    return TranscriptPayload.model_validate(raw)
+def _load_transcript_file(path: Path, *, format_hint: str) -> TranscriptPayload:
+    return load_transcript_payload(path, format_hint=format_hint)
 
 
 def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
@@ -586,7 +836,9 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
 
         if manifest.transcript is not None:
             transcript_file = _safe_join(source_path, manifest.transcript.path)
-            transcript_payload = _load_transcript_file(transcript_file)
+            transcript_payload = _load_transcript_file(
+                transcript_file, format_hint=manifest.transcript.format
+            )
             options = manifest.transcript.options or ChunkingOptions()
             ingest_transcript(call_ref, transcript_payload.content, options)
 
@@ -594,7 +846,9 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
             artifacts: List[AnalysisArtifactIn] = []
             for analysis_ref in manifest.analysis:
                 analysis_file = _safe_join(source_path, analysis_ref.path)
-                content = analysis_file.read_text(encoding="utf-8").strip()
+                content = load_analysis_content(
+                    analysis_file, format_hint=analysis_ref.format
+                ).strip()
                 artifacts.append(
                     AnalysisArtifactIn(
                         kind=analysis_ref.kind,

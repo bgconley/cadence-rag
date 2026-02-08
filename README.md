@@ -113,6 +113,30 @@ Start queue services (if not already running):
 docker compose up -d redis ingest_scanner ingest_worker
 ```
 
+No-manifest quick drop (recommended):
+```text
+ingest/
+  inbox/
+    starcluster-call-20251125/
+      Starcluster call 20251125 maor.md
+      analysis/
+        action_items.csv
+      _READY
+```
+
+When `INGEST_AUTO_MANIFEST=true` (default), scanner auto-generates `manifest.json` from files.
+It infers transcript + analysis formats and call reference metadata deterministically.
+
+Single-file quick drop (no folder, no manifest):
+```text
+ingest/
+  inbox/
+    Starcluster call 20251125 maor.md
+```
+
+Scanner will auto-wrap the file into an internal bundle in `processing/`, generate a manifest, and queue it.
+To avoid ingesting files while they are still being copied, scanner waits `INGEST_SINGLE_FILE_MIN_AGE_S` seconds (default `5`).
+
 Drop a bundle:
 ```text
 ingest/
@@ -137,14 +161,20 @@ ingest/
   },
   "transcript": {
     "path": "transcript.json",
-    "format": "json_turns"
+    "format": "auto"
   },
   "analysis": [
-    { "kind": "summary", "path": "analysis/summary.md" },
-    { "kind": "action_items", "path": "analysis/action_items.md" }
+    { "kind": "summary", "path": "analysis/summary.md", "format": "markdown" },
+    { "kind": "action_items", "path": "analysis/action_items.csv", "format": "csv" }
   ]
 }
 ```
+
+Filesystem ingest format notes:
+- Transcript `format` supports `json_turns` (strict), `markdown_turns` (speaker/timestamp Markdown transcripts), and `auto` (adapter normalization).
+- Analysis `format` supports `auto`, `text`, `markdown`, `csv`, `tsv`, `json`, `html`, `docx`, and `pdf`.
+- With `auto`, transcript/analysis files are normalized by extension/content so table-heavy exports can still be ingested.
+- Auto-manifest mode can be disabled with `INGEST_AUTO_MANIFEST=false` (then `manifest.json` is required).
 
 Check job status:
 ```bash

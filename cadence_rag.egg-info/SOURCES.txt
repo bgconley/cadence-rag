@@ -6,6 +6,7 @@ app/config.py
 app/db.py
 app/embeddings.py
 app/ingest.py
+app/ingest_adapters.py
 app/ingest_fs.py
 app/logging_utils.py
 app/main.py

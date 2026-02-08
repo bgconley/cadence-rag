@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.ingest_fs import _build_retry_policy, validate_bundle_directory
+from app.ingest_fs import _build_auto_manifest, _build_retry_policy, validate_bundle_directory
 
 
 def _write(path: Path, content: str) -> None:
@@ -82,3 +82,37 @@ def test_build_retry_policy_backoff_intervals() -> None:
     assert retry is not None
     assert retry.max == 3
     assert list(retry.intervals) == [5, 10, 20]
+
+
+def test_build_auto_manifest_infers_transcript_and_analysis(tmp_path: Path) -> None:
+    bundle = tmp_path / "starcluster-call-001"
+    bundle.mkdir(parents=True)
+    _write(
+        bundle / "Starcluster call.md",
+        "**Speaker A**: Opening\n*00:00*\n",
+    )
+    _write(bundle / "analysis" / "action_items.csv", "owner,item\nAlice,Follow up\n")
+
+    manifest = _build_auto_manifest(bundle)
+    assert manifest.bundle_id == "starcluster-call-001"
+    assert manifest.call_ref.external_source == "filesystem"
+    assert manifest.call_ref.external_id == "starcluster-call-001"
+    assert manifest.transcript is not None
+    assert manifest.transcript.path == "Starcluster call.md"
+    assert manifest.transcript.format == "markdown_turns"
+    assert len(manifest.analysis) == 1
+    assert manifest.analysis[0].kind == "action_items"
+    assert manifest.analysis[0].format == "csv"
+
+
+def test_build_auto_manifest_sanitizes_bundle_id(tmp_path: Path) -> None:
+    bundle = tmp_path / "Starcluster Four Way Call 20251126"
+    bundle.mkdir(parents=True)
+    _write(
+        bundle / "call.md",
+        "**Speaker A**: Opening\n*00:00*\n",
+    )
+
+    manifest = _build_auto_manifest(bundle)
+    assert manifest.bundle_id == "Starcluster-Four-Way-Call-20251126"
+    assert manifest.call_ref.external_id == "Starcluster-Four-Way-Call-20251126"

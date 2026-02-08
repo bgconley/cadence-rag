@@ -499,8 +499,8 @@ Provenance storage (recommended in `metadata`):
 ## 8) Ingestion pipeline
 
 ### 8.1 Inputs
-- Transcript formats: `json_turns`, `vtt`, `srt`, plain text (line-based)
-- Post-call artifacts: summary, decisions, action items, tech notes
+- Transcript formats: `json_turns` plus adapter-normalized JSON via `format=auto` (for common export variants)
+- Post-call artifacts: summary, decisions, action items, tech notes (`markdown`, `text`, `csv`, `tsv`, `json`, `html`, `docx`, `pdf`)
 
 ### 8.2 Pipeline stages
 1. **Parse + normalize**
@@ -545,9 +545,12 @@ Use a deterministic drop-folder contract for unattended ingest:
 
 - Root: `INGEST_ROOT_DIR` (default `./ingest`)
 - Scanner input: `INGEST_ROOT_DIR/inbox/<bundle_id>/`
+- Scanner also supports single-file drops directly in `INGEST_ROOT_DIR/inbox/` (auto-wrap mode)
 - Required files in each bundle directory:
-  - `manifest.json`
   - `_READY` sentinel (scanner ignores bundles until this exists)
+- `manifest.json` is optional when auto-manifest is enabled (`INGEST_AUTO_MANIFEST=true`):
+  - scanner infers transcript + analysis files and writes deterministic `manifest.json`
+  - scanner sets `call_ref.external_source=filesystem` and `call_ref.external_id=<bundle_id>`
 - Scanner lifecycle directories:
   - `inbox/` → `processing/` → `done/` (or `failed/`)
 
@@ -563,7 +566,7 @@ Use a deterministic drop-folder contract for unattended ingest:
   },
   "transcript": {
     "path": "transcript.json",
-    "format": "json_turns",
+    "format": "auto",
     "sha256": "optional sha256 hex",
     "options": { "target_tokens": 350, "max_tokens": 600, "overlap_tokens": 50 }
   },
@@ -571,6 +574,7 @@ Use a deterministic drop-folder contract for unattended ingest:
     {
       "kind": "summary",
       "path": "analysis/summary.md",
+      "format": "markdown",
       "sha256": "optional sha256 hex",
       "metadata": { "producer": "post-call-bot" }
     }
@@ -578,7 +582,19 @@ Use a deterministic drop-folder contract for unattended ingest:
 }
 ```
 
+Format behavior:
+- `transcript.format`:
+  - `json_turns`: strict schema (`speaker`, `start_ts_ms`, `end_ts_ms`, `text`)
+  - `markdown_turns`: Markdown transcripts (`**Speaker**: text` + timestamp lines)
+  - `auto`: adapter maps common JSON export variants and Markdown transcripts into canonical `json_turns`
+- `analysis[].format`:
+  - `auto`, `text`, `markdown`, `csv`, `tsv`, `json`, `html`, `docx`, `pdf`
+  - tabular/structured formats are normalized to retrieval-friendly text before ingest
+
 Operational behavior:
+- If `manifest.json` is absent and auto-manifest is enabled, scanner generates one before validation.
+- In single-file auto-wrap mode, scanner creates a processing bundle from the file, generates a manifest, then enqueues normally.
+- Scanner applies a minimum file age gate before consuming direct inbox files (`INGEST_SINGLE_FILE_MIN_AGE_S`) to avoid partial-copy ingest.
 - Scanner validates required files and optional `sha256` checks before enqueueing.
 - Scanner writes one row in `ingest_jobs` and per-file metadata in `ingest_job_files`.
 - Worker updates status transitions: `queued` → `running` → `succeeded|failed`.
