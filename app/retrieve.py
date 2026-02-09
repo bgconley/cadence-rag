@@ -292,10 +292,9 @@ def _configure_dense_session(conn, mode: str) -> None:
         conn.execute(text("SET LOCAL enable_indexscan = on"))
         conn.execute(text("SET LOCAL enable_bitmapscan = on"))
         conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
-        conn.execute(
-            text("SET LOCAL hnsw.ef_search = :ef_search"),
-            {"ef_search": settings.embeddings_hnsw_ef_search},
-        )
+        ef_search = max(1, int(settings.embeddings_hnsw_ef_search))
+        # PostgreSQL GUC SET does not support bind parameters here.
+        conn.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
         return
     conn.execute(text("SET LOCAL enable_indexscan = off"))
     conn.execute(text("SET LOCAL enable_bitmapscan = off"))
