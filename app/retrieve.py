@@ -335,16 +335,17 @@ def _fetch_chunks_dense(
     where_sql, params, join_calls = _build_filter_clause(filters, "chunks", call_ids)
     join_sql = "JOIN calls c ON c.call_id = chunks.call_id" if join_calls else ""
     params.update({"query_embedding": query_embedding, "limit": limit})
+    vector_dim = max(1, int(settings.embeddings_dim))
     rows = conn.execute(
         text(
             f"""
             SELECT chunk_id, call_id, speaker, start_ts_ms, end_ts_ms, text,
-                   (1 - (chunks.embedding <=> CAST(:query_embedding AS vector(1024)))) AS score
+                   (1 - (chunks.embedding <=> CAST(:query_embedding AS vector({vector_dim})))) AS score
             FROM chunks
             {join_sql}
             WHERE {where_sql}
               AND chunks.embedding IS NOT NULL
-            ORDER BY chunks.embedding <=> CAST(:query_embedding AS vector(1024))
+            ORDER BY chunks.embedding <=> CAST(:query_embedding AS vector({vector_dim}))
             LIMIT :limit
             """
         ),
@@ -369,16 +370,17 @@ def _fetch_artifacts_dense(
         "JOIN calls c ON c.call_id = artifact_chunks.call_id" if join_calls else ""
     )
     params.update({"query_embedding": query_embedding, "limit": limit})
+    vector_dim = max(1, int(settings.embeddings_dim))
     rows = conn.execute(
         text(
             f"""
             SELECT artifact_chunk_id, artifact_id, call_id, kind, content,
-                   (1 - (artifact_chunks.embedding <=> CAST(:query_embedding AS vector(1024)))) AS score
+                   (1 - (artifact_chunks.embedding <=> CAST(:query_embedding AS vector({vector_dim})))) AS score
             FROM artifact_chunks
             {join_sql}
             WHERE {where_sql}
               AND artifact_chunks.embedding IS NOT NULL
-            ORDER BY artifact_chunks.embedding <=> CAST(:query_embedding AS vector(1024))
+            ORDER BY artifact_chunks.embedding <=> CAST(:query_embedding AS vector({vector_dim}))
             LIMIT :limit
             """
         ),

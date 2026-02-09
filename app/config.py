@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     ingest_single_file_min_age_s: int = 5
     ingest_job_max_attempts: int = 3
     ingest_job_retry_backoff_s: int = 10
+    ingest_auto_embed_on_success: bool = True
+    ingest_auto_embed_fail_on_error: bool = False
     analysis_pdf_ocr_enabled: bool = False
     analysis_pdf_ocr_command: str = "ocrmypdf"
     analysis_pdf_ocr_languages: str = "eng"

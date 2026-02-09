@@ -31,14 +31,19 @@ def main() -> None:
         raise SystemExit("--poll-seconds must be > 0")
 
     while True:
-        summary = scan_inbox_once()
-        logger.info(
-            "ingest_scanner.pass discovered=%s queued=%s duplicates=%s invalid=%s",
-            summary["discovered"],
-            summary["queued"],
-            summary["duplicates"],
-            summary["invalid"],
-        )
+        try:
+            summary = scan_inbox_once()
+            logger.info(
+                "ingest_scanner.pass discovered=%s queued=%s duplicates=%s invalid=%s",
+                summary["discovered"],
+                summary["queued"],
+                summary["duplicates"],
+                summary["invalid"],
+            )
+        except Exception as exc:  # pragma: no cover - runtime hardening for service loop
+            logger.exception("ingest_scanner.pass_failed error=%s", str(exc))
+            if args.once:
+                raise
         if args.once:
             return
         time.sleep(args.poll_seconds)

@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
-from app.ingest_fs import _build_auto_manifest, _build_retry_policy, validate_bundle_directory
+import app.ingest_fs as ingest_fs
+from app.embeddings import EmbeddingClientError
+from app.ingest_fs import (
+    _auto_embed_call_if_configured,
+    _build_auto_manifest,
+    _build_retry_policy,
+    validate_bundle_directory,
+)
 
 
 def _write(path: Path, content: str) -> None:
@@ -116,3 +125,71 @@ def test_build_auto_manifest_sanitizes_bundle_id(tmp_path: Path) -> None:
     manifest = _build_auto_manifest(bundle)
     assert manifest.bundle_id == "Starcluster-Four-Way-Call-20251126"
     assert manifest.call_ref.external_id == "Starcluster-Four-Way-Call-20251126"
+
+
+def test_auto_embed_call_skips_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_on_success", False)
+    result = _auto_embed_call_if_configured(uuid4())
+    assert result["status"] == "skipped"
+    assert result["reason"] == "disabled"
+
+
+def test_auto_embed_call_skips_when_embeddings_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_on_success", True)
+    monkeypatch.setattr(ingest_fs, "embeddings_enabled", lambda: False)
+    result = _auto_embed_call_if_configured(uuid4())
+    assert result["status"] == "skipped"
+    assert result["reason"] == "embeddings_not_configured"
+
+
+def test_auto_embed_call_reports_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_on_success", True)
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_fail_on_error", False)
+    monkeypatch.setattr(ingest_fs, "embeddings_enabled", lambda: True)
+
+    summary = SimpleNamespace(
+        rows_updated=7,
+        calls_touched=1,
+        ingestion_runs_inserted=1,
+        model_used="Qwen/Qwen3-Embedding-4B",
+        per_table={"chunks": 4, "artifact_chunks": 3},
+    )
+    monkeypatch.setattr(ingest_fs, "run_embedding_backfill", lambda **kwargs: summary)
+
+    result = _auto_embed_call_if_configured(uuid4())
+    assert result["status"] == "ok"
+    assert result["rows_updated"] == 7
+    assert result["model_used"] == "Qwen/Qwen3-Embedding-4B"
+
+
+def test_auto_embed_call_returns_error_when_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_on_success", True)
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_fail_on_error", False)
+    monkeypatch.setattr(ingest_fs, "embeddings_enabled", lambda: True)
+
+    def _raise(**kwargs):
+        raise EmbeddingClientError("service timeout")
+
+    monkeypatch.setattr(ingest_fs, "run_embedding_backfill", _raise)
+    result = _auto_embed_call_if_configured(uuid4())
+    assert result["status"] == "error"
+    assert "service timeout" in result["error"]
+
+
+def test_auto_embed_call_raises_when_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_on_success", True)
+    monkeypatch.setattr(ingest_fs.settings, "ingest_auto_embed_fail_on_error", True)
+    monkeypatch.setattr(ingest_fs, "embeddings_enabled", lambda: True)
+
+    def _raise(**kwargs):
+        raise EmbeddingClientError("service timeout")
+
+    monkeypatch.setattr(ingest_fs, "run_embedding_backfill", _raise)
+    with pytest.raises(EmbeddingClientError):
+        _auto_embed_call_if_configured(uuid4())

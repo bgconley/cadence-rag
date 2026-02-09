@@ -17,6 +17,8 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
+from .embedding_pipeline import run_embedding_backfill
+from .embeddings import EmbeddingClientError, embeddings_enabled
 from .ingest_adapters import load_analysis_content, load_transcript_payload
 from .ingest import ingest_analysis, ingest_call, ingest_transcript
 from .logging_utils import get_logger
@@ -804,6 +806,37 @@ def _load_transcript_file(path: Path, *, format_hint: str) -> TranscriptPayload:
     return load_transcript_payload(path, format_hint=format_hint)
 
 
+def _auto_embed_call_if_configured(call_id: UUID) -> Dict[str, Any]:
+    if not settings.ingest_auto_embed_on_success:
+        return {"status": "skipped", "reason": "disabled"}
+    if not embeddings_enabled():
+        return {"status": "skipped", "reason": "embeddings_not_configured"}
+
+    try:
+        summary = run_embedding_backfill(
+            batch_size=max(1, int(settings.embeddings_batch_size)),
+            call_id=call_id,
+            source="ingest_auto_embed",
+        )
+    except EmbeddingClientError as exc:
+        if settings.ingest_auto_embed_fail_on_error:
+            raise
+        return {"status": "error", "error": str(exc)}
+    except Exception as exc:
+        if settings.ingest_auto_embed_fail_on_error:
+            raise
+        logger.exception("ingest_job.auto_embed_failed call_id=%s error=%s", call_id, str(exc))
+        return {"status": "error", "error": str(exc)}
+
+    return {
+        "status": "ok",
+        "rows_updated": summary.rows_updated,
+        "calls_touched": summary.calls_touched,
+        "model_used": summary.model_used,
+        "ingestion_runs_inserted": summary.ingestion_runs_inserted,
+    }
+
+
 def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
     job_uuid = UUID(ingest_job_id)
     job = get_ingest_job(job_uuid)
@@ -858,6 +891,23 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
                 )
             ingest_analysis(call_ref, artifacts)
 
+        embed_result = _auto_embed_call_if_configured(call_id)
+        if embed_result.get("status") == "ok":
+            logger.info(
+                "ingest_job.auto_embed_complete ingest_job_id=%s call_id=%s rows_updated=%s model=%s",
+                ingest_job_id,
+                call_id,
+                embed_result.get("rows_updated"),
+                embed_result.get("model_used"),
+            )
+        elif embed_result.get("status") == "error":
+            logger.warning(
+                "ingest_job.auto_embed_error ingest_job_id=%s call_id=%s error=%s",
+                ingest_job_id,
+                call_id,
+                embed_result.get("error"),
+            )
+
         update_ingest_job_status(
             job_uuid,
             STATUS_SUCCEEDED,
@@ -878,6 +928,7 @@ def process_ingest_job(ingest_job_id: str) -> Dict[str, Any]:
             "status": STATUS_SUCCEEDED,
             "call_id": str(call_id),
             "done_path": str(done_path),
+            "embedding": embed_result,
         }
     except Exception as exc:
         error = str(exc)

@@ -94,9 +94,16 @@ EMBEDDINGS_TIMEOUT_S=180
 EMBEDDINGS_BATCH_SIZE=32
 EMBEDDINGS_EXACT_SCAN_THRESHOLD=2000
 EMBEDDINGS_HNSW_EF_SEARCH=80
+INGEST_AUTO_EMBED_ON_SUCCESS=true
+INGEST_AUTO_EMBED_FAIL_ON_ERROR=false
 ```
 
-Backfill existing rows with null embeddings:
+Notes:
+- New ingest jobs auto-embed `chunks` and `artifact_chunks` for that call when `INGEST_AUTO_EMBED_ON_SUCCESS=true` and `EMBEDDINGS_BASE_URL` is set.
+- `EMBEDDINGS_BATCH_SIZE` should respect your embedding endpoint limit (for example `8` on your current Triton model). The backfill script adaptively shrinks batch size when provider errors indicate an upper bound.
+- `INGEST_AUTO_EMBED_FAIL_ON_ERROR=false` keeps ingest fail-open if embedding service is unavailable; set to `true` for strict fail-closed behavior.
+
+Backfill existing rows with null embeddings (historical data / catch-up):
 ```bash
 uv run python -m app.scripts.embed_backfill
 ```

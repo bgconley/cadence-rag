@@ -1,0 +1,17 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+.venv/
+venv/
+
+# Local environment and runtime state
+.env
+.pytest_cache/
+
+# Local ingest runtime artifacts
+ingest/inbox/
+ingest/processing/
+ingest/done/
+ingest/failed/
