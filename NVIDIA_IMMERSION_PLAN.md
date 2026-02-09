@@ -4,6 +4,17 @@ This is a human-run, step-by-step plan to learn NVIDIA's inference + tooling eco
 by deploying GPU endpoints that this repo will call (embeddings, rerank, LLM), then
 adding profiling and telemetry.
 
+## Current Checkpoint (2026-02-09)
+- Milestone 2 (Triton baseline): complete.
+- Milestone 3 (embeddings endpoint): complete in this repo integration path.
+- Repo integration status:
+  - `/retrieve` dense lane is active when `EMBEDDINGS_BASE_URL` is configured.
+  - ingest worker can auto-embed new rows after successful ingest (config-gated).
+  - `embed_backfill` supports adaptive batch-size downshift to match endpoint limits.
+- Next NVIDIA milestones for this repo:
+  - Milestone 4 rerank endpoint (`/rerank`)
+  - Milestone 5 OpenAI-compatible LLM endpoint (`/v1/chat/completions`)
+
 This plan is intentionally separate from the canonical product docs:
 - `APP_SPEC.md` (contracts)
 - `IMPLEMENTATION_PLAN.md` (non-negotiables)
@@ -124,7 +135,7 @@ flowchart LR
 ### How This Maps To The RAG Data Flow
 Ingestion flow (Phase 1 + Phase 3 backfill):
 1. Transcript/analysis is ingested into Postgres (`utterances`, `chunks`, `analysis_artifacts`).
-2. Embeddings service generates 1024-d vectors for `chunks.embedding` and `analysis_artifacts.embedding`.
+2. Embeddings service generates 1024-d vectors for `chunks.embedding` and `artifact_chunks.embedding` (optionally `analysis_artifacts.embedding` as coarse fallback).
 3. Postgres indexes (pgvector HNSW + BM25 + tech_tokens) support deterministic retrieval.
 
 Query flow (Phase 2/3/4/5):
@@ -811,7 +822,7 @@ Minimum checks:
 3. Batch requests return one vector per input.
 4. Latency is acceptable and stable (watch Triton metrics on `:8202/metrics`).
 
-RAG wiring (later, when we implement Phase 3 in this repo):
+RAG wiring (current, already implemented in this repo):
 - `EMBEDDINGS_BASE_URL=http://127.0.0.1:8101`
 - `EMBEDDINGS_DIM=1024`
 
@@ -1361,7 +1372,9 @@ How:
 ## Milestone 8: Wire This Repo To NVIDIA Endpoints
 Outcome: the RAG API uses GPU services deterministically (no tool loops).
 
-1. Implement Phase 3 in this repo (dense embeddings lane + HTTP embedding client).
+1. Confirm Phase 3 wiring in this repo (dense embeddings lane + HTTP embedding client) is configured:
+   - `/retrieve` uses dense lane when `EMBEDDINGS_BASE_URL` is set
+   - optional ingest-time auto-embed is controlled by `INGEST_AUTO_EMBED_ON_SUCCESS`
 2. Set env vars (in a local `.env`, not committed):
 - `EMBEDDINGS_BASE_URL=http://127.0.0.1:8101`
 - `EMBEDDINGS_MODEL_ID=<your embedding model>`

@@ -1,18 +1,31 @@
 # Cadence RAG (Transcript-Centric) — Implementation Plan
 **Status:** Canonical  
-**Last updated:** 2026-02-04  
+**Last updated:** 2026-02-09  
 
 ## 0) Guiding rules (non-negotiable)
 - Retrieval is deterministic and server-orchestrated; the LLM never “chooses tools.”
 - The LLM sees only a budgeted evidence pack and must cite every sentence.
 - Exact technical token recall is treated as a first-class requirement (not “nice to have”).
 - Pin versions early (DB image + extensions + models), **assert at startup**, and record configs per ingestion run.
+- Canonical phase sequencing and execution scope are tracked in `PHASED_PLAN.md`; this doc focuses on implementation principles and capability design.
 
 ## 0.1) Pinned versions (as of 2026-02-04)
 - Postgres: **18.1**
 - ParadeDB Docker image: `paradedb/paradedb:0.21.5-pg18` (then pin by digest)
 - `pg_search` (extversion): **0.21.5**
 - `pgvector` / `vector` (extversion): **0.8.1**
+
+## 0.2) Current execution checkpoint (2026-02-09)
+- Implemented in codebase:
+  - Phases 0 through 2D from `PHASED_PLAN.md`
+  - Phase 3 dense retrieval lane (`/retrieve`) with embedding client + planner (exact vs ANN)
+  - Embedding ops hardening:
+    - adaptive batch-size downshift in `embed_backfill`
+    - optional ingest-time auto-embed of newly ingested call rows
+    - configurable fail-open vs fail-closed behavior for auto-embed
+- Next in execution order:
+  - Phase 4 reranking integration
+  - Phase 5 `/answer` with citation gating
 
 ## 1) Phase 0 — Project bootstrap + database foundation
 **Goal:** runnable local stack with the canonical schema and a minimal API skeleton.
@@ -90,7 +103,8 @@
 - Ingest analysis-only and later transcript; both attach to the same call via `call_ref`
 - Drop-folder ingest works end-to-end without manual API calls per file
 
-## 4) Phase 2 — Search lanes (BM25 + exact-token + dense)
+## 4) Capability band — Search lanes (BM25 + exact-token + dense)
+Mapping note: corresponds to Phases 2B/2C/3 in `PHASED_PLAN.md`.
 **Goal:** implement the three retrieval lanes with stable, explainable outputs.
 
 ### Deliverables
@@ -106,6 +120,10 @@
 - Dense vector search using `pgvector` HNSW for:
   - chunks.embedding
   - artifact_chunks.embedding
+- Embedding operations hardening:
+  - call-scoped auto-embed after successful ingest (config-gated)
+  - adaptive batch-size downshift for backfill when provider-enforced limits are lower than configured batch size
+  - explicit fail-open/fail-closed control for embedding during ingest
 - Retrieval planner:
   - decides ANN vs exact scan for dense queries based on filter selectivity / estimated rows
 - A single `POST /retrieve` endpoint returning:
@@ -118,8 +136,10 @@
 ### Acceptance criteria
 - Queries containing exact tokens like `ECONNRESET` / `ABC-123` reliably return matches
 - Dense retrieval works with filters without “empty result surprises” (planner chooses exact scan when appropriate)
+- Dense ingestion/backfill flows complete reliably across embedding services with different batch ceilings.
 
-## 5) Phase 3 — Reranking + evidence packs
+## 5) Capability band — Reranking + evidence packs
+Mapping note: corresponds to Phase 4 in `PHASED_PLAN.md`.
 **Goal:** turn candidate lists into compact, high-signal evidence packs.
 
 ### Deliverables
@@ -137,7 +157,8 @@
 - Evidence packs stay under budget for all gold-set queries
 - Top evidence is not overly redundant (dedupe + per-call caps)
 
-## 6) Phase 4 — Answer endpoint with citation gating (reliability hardening)
+## 6) Capability band — Answer endpoint with citation gating (reliability hardening)
+Mapping note: corresponds to Phase 5 in `PHASED_PLAN.md`.
 **Goal:** one-shot answers with strict grounding guarantees.
 
 ### Deliverables
@@ -157,7 +178,8 @@
 - No uncited sentences pass the validator
 - Failure modes are repaired automatically (or return a structured “cannot answer from evidence” response)
 
-## 7) Phase 5 — Entities + faceting
+## 7) Capability band — Entities + faceting
+Mapping note: corresponds to Phase 6 in `PHASED_PLAN.md`.
 **Goal:** improve filtering, timelines, and query understanding.
 
 ### Deliverables
@@ -173,7 +195,8 @@
 - Entity filters narrow results without recall collapse (planner chooses exact scan as needed)
 - “ticket ABC-123” works even with ASR noise via combined BM25 + ngrams/trgm + tech_tokens
 
-## 8) Phase 6 — Performance + regression hardening
+## 8) Capability band — Performance + regression hardening
+Mapping note: corresponds to Phase 7 in `PHASED_PLAN.md`.
 **Goal:** make performance predictable and prevent quality regressions.
 
 ### Deliverables

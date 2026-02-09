@@ -1,6 +1,6 @@
 # Cadence RAG (Transcript-Centric) — App Spec
 **Status:** Canonical  
-**Last updated:** 2026-02-03  
+**Last updated:** 2026-02-09  
 
 ## 1) Summary
 Build a **local-first, transcript-centric Cadence RAG** optimized for **technical call transcripts**. The system is designed for **high recall on exact technical strings** (error codes, ticket IDs, stack traces) while still answering semantic questions accurately.
@@ -530,6 +530,7 @@ Provenance storage (recommended in `metadata`):
    - Embed transcript chunks and artifact chunks (dim=1024)
    - Default worker behavior: after successful ingest, auto-embed that call's new `chunks` and `artifact_chunks` when embedding service is configured
    - Auto-embed failure mode is configurable (fail-open by default; optional fail-closed)
+   - Backfill behavior should tolerate embedding-provider batch ceilings via adaptive batch-size downshift
    - (Optional) also embed whole artifacts (`analysis_artifacts.embedding`) as a coarse fallback vector
    - Store embedding config in `ingestion_runs`
 7. **Indexing**
@@ -602,6 +603,7 @@ Operational behavior:
 - Scanner writes one row in `ingest_jobs` and per-file metadata in `ingest_job_files`.
 - Worker updates status transitions: `queued` → `running` → `succeeded|failed`.
 - Worker can auto-embed newly ingested call rows when `EMBEDDINGS_BASE_URL` is configured; this is controlled by `INGEST_AUTO_EMBED_ON_SUCCESS` and `INGEST_AUTO_EMBED_FAIL_ON_ERROR`.
+- Embedding backfill should adapt batch size downward automatically when provider max-batch errors are detected.
 - OCR behavior for scanned PDFs is deterministic and gated by config thresholds (`ANALYSIS_PDF_OCR_MIN_CHARS`, `ANALYSIS_PDF_OCR_MIN_ALPHA_RATIO`, `ANALYSIS_PDF_OCR_MAX_PAGES`), and is disabled by default.
 - Worker retry behavior:
   - retry transient failures with bounded exponential backoff (`INGEST_JOB_MAX_ATTEMPTS`, `INGEST_JOB_RETRY_BACKOFF_S`)

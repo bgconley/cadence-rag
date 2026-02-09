@@ -1,6 +1,6 @@
 # Cadence RAG — Phased Implementation Plan (Forward Roadmap)
 **Status:** Canonical  \
-**Last updated:** 2026-02-07
+**Last updated:** 2026-02-09
 
 ## Summary (where we are now)
 **Already implemented and tested:**
@@ -23,9 +23,16 @@
   - bounded retry/backoff for transient failures before terminal `failed`
 - Unit + integration tests (Pytest) covering chunking, tech-token extraction, ingest + retrieve roundtrip, browse/expand, ids-only retrieval, and budget enforcement.
 - FastAPI startup migrated to lifespan (no deprecation warnings).
+- Dense embeddings lane is implemented in `/retrieve`:
+  - embedding client via `EMBEDDINGS_*` settings
+  - planner path for exact vs ANN vector queries
+  - configurable filtered ANN behavior (`EMBEDDINGS_HNSW_EF_SEARCH`)
+- Embedding operations hardening is implemented:
+  - `embed_backfill` supports adaptive batch-size downshift when provider max-batch limits are hit
+  - ingest worker can auto-embed newly ingested call rows (`INGEST_AUTO_EMBED_ON_SUCCESS`)
+  - auto-embed failure behavior is configurable (`INGEST_AUTO_EMBED_FAIL_ON_ERROR`)
 
 **Not implemented yet (next):**
-- Dense embeddings lane + pgvector retrieval planner.
 - GPU reranking.
 - `/answer` with citation gating and LLM gateway.
 - Entity extraction + entity filters + faceting.
@@ -85,7 +92,7 @@
 
 ---
 
-## Phase 2B — Retrieval contract hardening (still no embeddings)
+## Phase 2B — Retrieval contract hardening (pre-dense baseline)
 **Goal:** make `/retrieve` “production-shaped” for downstream `/answer` and evaluation.
 
 ### Deliverables
@@ -120,7 +127,7 @@
 
 ---
 
-## Phase 2C — Analysis artifact chunking (`artifact_chunks`) + artifact-lane fixups (still no embeddings)
+## Phase 2C — Analysis artifact chunking (`artifact_chunks`) + artifact-lane fixups (embedding-ready)
 **Goal:** make analysis artifacts behave like transcripts in retrieval: chunk-level candidates, relevant snippets, and future-ready embeddings.
 
 ### Deliverables
@@ -129,7 +136,7 @@
    - Indexes:
      - BM25 (+ ngram alias) on `artifact_chunks.content` (primary lexical lane for analysis evidence)
      - GIN on `artifact_chunks.tech_tokens`
-     - (prep for Phase 3) HNSW on `artifact_chunks.embedding vector(1024)` (even if embeddings remain null for now)
+     - HNSW on `artifact_chunks.embedding vector(1024)`
 
 2) **Ingest: chunk analysis artifacts deterministically**
    - On `POST /ingest/analysis`:
@@ -222,6 +229,8 @@
 ---
 
 ## Phase 3 — Dense embeddings lane (pgvector) via HTTP embedding service
+**Status:** Implemented in core API/scripts; continue tuning batch sizes and ANN thresholds per deployment.
+
 **Goal:** add semantic recall while keeping tool usage deterministic.
 
 ### Deliverables
@@ -238,8 +247,15 @@
    - Behavior:
      - Finds rows in `chunks` and `artifact_chunks` where `embedding IS NULL`.
      - Batches embedding requests.
+     - Downshifts batch size automatically when provider limits are lower than configured batch size.
      - Updates embeddings in DB.
      - Writes an `ingestion_runs` update/record indicating embedding completion.
+
+2b) **Optional auto-embed on ingest success**
+   - Worker can embed the just-ingested call immediately after successful transcript/artifact ingest.
+   - Controlled by:
+     - `INGEST_AUTO_EMBED_ON_SUCCESS`
+     - `INGEST_AUTO_EMBED_FAIL_ON_ERROR`
 
 3) **Dense retrieval lane + planner**
    - Add to `/retrieve`:
@@ -263,6 +279,7 @@
 ### Acceptance criteria
 - Semantic queries improve recall without breaking exact-token performance.
 - Filtered queries do not “mysteriously return nothing” due to ANN overfiltering.
+- Embedding backfill and ingest-time embedding tolerate provider batch-limit differences without operator hand-holding.
 
 ---
 

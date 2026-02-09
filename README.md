@@ -1,5 +1,10 @@
 # Cadence RAG — Foundation
 
+## Roadmap checkpoint (2026-02-09)
+- Implemented: Phases 0 through 2D, plus Phase 3 dense retrieval lane and embedding hardening.
+- Next: Phase 4 reranking, then Phase 5 citation-gated `/answer`.
+- Canonical phase ordering and acceptance criteria live in `/Users/brennanconley/vibecode/personal-rag/PHASED_PLAN.md`.
+
 ## Quickstart (Phase 0)
 
 ### Stack naming (`cadence-rag`)
